@@ -2,7 +2,8 @@ const Seller = require('../models/Seller');
 const QRCode = require('qrcode');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
-
+const axios = require('axios');
+// --- REGISTRATION CONTROLLER WITH FREE OPENSTREETMAP (NOMINATIM) ---
 exports.register = async (req, res) => {
   try {
     const {
@@ -12,7 +13,6 @@ exports.register = async (req, res) => {
       phone,
       address,
       businessType,
-      location,
       startingPrice,
       description,
       maxPersonsAllowed,
@@ -25,7 +25,8 @@ exports.register = async (req, res) => {
       foodType,
       roomsAvailable,
       bookingPolicy,
-      additionalFeatures
+      additionalFeatures,
+      deviceCoordinates // Captured directly from device sensors
     } = req.body;
 
     const normalizedEmail = email && email.toLowerCase().trim();
@@ -44,6 +45,60 @@ exports.register = async (req, res) => {
       return res.status(400).json({ success: false, message: `Missing required fields: ${missingFields.join(', ')}` });
     }
 
+    // --- GEOLOCATION RESOLUTION CONTEXT ---
+    let coordinates = [0, 0];
+
+    // Priority 1: High-Accuracy Frontend Client GPS Coordinates
+    if (deviceCoordinates) {
+      try {
+        const parsedCoords = typeof deviceCoordinates === 'string' ? JSON.parse(deviceCoordinates) : deviceCoordinates;
+        if (Array.isArray(parsedCoords) && parsedCoords.length === 2) {
+          coordinates = [parseFloat(parsedCoords[0]), parseFloat(parsedCoords[1])];
+          console.log(`Using precise device tracking hardware vectors: [${coordinates}]`);
+        }
+      } catch (err) {
+        console.error('Error handling device coordinates structure payload:', err.message);
+      }
+    }
+
+    // Priority 2: Multi-Tier String Lookup Cascades via OpenStreetMap Nominatim
+    if (coordinates[0] === 0 && address && address.trim() !== '') {
+      try {
+        // Pass 1: Try exact clean address
+        const cleanAddress = address.replace(/(near|opposite|behind|beside|in front of)[^,]+/gi, '').trim();
+        let encodedAddress = encodeURIComponent(cleanAddress);
+        let url = `https://nominatim.openstreetmap.org/search?q=${encodedAddress}&format=json&limit=1`;
+        
+        let response = await axios.get(url, {
+          headers: { 'User-Agent': 'CelebrationMarketplaceApp/1.0 (contact: your-email@example.com)' }
+        });
+        
+        // Pass 2: Fallback extraction parsing for 6-Digit PIN Codes
+        if (!response.data || response.data.length === 0) {
+          const pinMatch = address.match(/\b\d{6}\b/);
+          if (pinMatch) {
+            url = `https://nominatim.openstreetmap.org/search?postalcode=${pinMatch[0]}&country=India&format=json&limit=1`;
+            response = await axios.get(url, { headers: { 'User-Agent': 'CelebrationMarketplaceApp/1.0' } });
+          }
+        }
+
+        // Pass 3: City Fallback Core Coordinates
+        if (!response.data || response.data.length === 0) {
+          const fallbackCity = req.body.location || "Arrah";
+          url = `https://nominatim.openstreetmap.org/search?city=${encodeURIComponent(fallbackCity)}&country=India&format=json&limit=1`;
+          response = await axios.get(url, { headers: { 'User-Agent': 'CelebrationMarketplaceApp/1.0' } });
+        }
+
+        if (response.data && response.data.length > 0) {
+          const lat = parseFloat(response.data[0].lat);
+          const lon = parseFloat(response.data[0].lon);
+          coordinates = [lon, lat]; // GeoJSON index ordering format maps [longitude, latitude]
+        }
+      } catch (geoError) {
+        console.error('OpenStreetMap fallback engines operation exception:', geoError.message);
+      }
+    }
+
     // Process uploaded images
     let images = [];
     if (req.files && req.files.length > 0) {
@@ -54,13 +109,9 @@ exports.register = async (req, res) => {
       }));
     }
 
-
-
-    // Process included, excluded, and faq
     const processIncludedExcluded = (data) => {
       if (!data) return [];
       if (Array.isArray(data)) return data;
-      // Split by newline or comma
       return data.split(/[\n,]/).map(item => item.trim()).filter(item => item);
     };
 
@@ -74,7 +125,6 @@ exports.register = async (req, res) => {
       }
     };
 
-    // Create seller with all info including new fields
     const seller = await Seller.create({
       businessName,
       email: normalizedEmail,
@@ -82,7 +132,10 @@ exports.register = async (req, res) => {
       phone,
       address,
       businessType,
-      location,
+      location: {
+        type: 'Point',
+        coordinates: coordinates
+      },
       startingPrice,
       description,
       maxPersonsAllowed,
@@ -102,15 +155,8 @@ exports.register = async (req, res) => {
       images
     });
 
-    // Create JWT token for seller (expires in 30 days)
     const token = jwt.sign(
-      {
-        id: seller._id,
-        email: seller.email,
-        businessName: seller.businessName,
-        type: 'seller',
-        isSeller: true
-      },
+      { id: seller._id, email: seller.email, businessName: seller.businessName, type: 'seller', isSeller: true },
       process.env.JWT_SECRET_SELLER || 'your-secret-key',
       { expiresIn: '30d' }
     );
@@ -126,7 +172,7 @@ exports.register = async (req, res) => {
         phone: seller.phone,
         address: seller.address,
         businessType: seller.businessType,
-        location: seller.location,
+        location: seller.location, 
         startingPrice: seller.startingPrice,
         description: seller.description,
         maxPersonsAllowed: seller.maxPersonsAllowed,
@@ -153,77 +199,6 @@ exports.register = async (req, res) => {
     res.status(500).json({ success: false, message: 'Error registering seller' });
   }
 };
-
-// Login seller
-exports.login = async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    const normalizedEmail = email.toLowerCase().trim();
-
-    // Check if seller exists
-    const seller = await Seller.findOne({ email: normalizedEmail });
-    if (!seller) {
-      return res.status(401).json({ success: false, message: 'Invalid credentials' });
-    }
-
-    // Check password
-    const isMatch = await seller.comparePassword(password);
-    if (!isMatch) {
-      return res.status(401).json({ success: false, message: 'Invalid credentials' });
-    }
-
-    // Create JWT token (expires in 30 days)
-    const token = jwt.sign(
-      {
-        id: seller._id,
-        email: seller.email,
-        businessName: seller.businessName,
-        type: 'seller',
-        isSeller: true
-      },
-      process.env.JWT_SECRET_SELLER || 'your-secret-key',
-      { expiresIn: '30d' }
-    );
-
-    res.json({
-      success: true,
-      message: 'Login successful',
-      token,
-      seller: {
-        id: seller._id,
-        businessName: seller.businessName,
-        email: seller.email,
-        phone: seller.phone,
-        address: seller.address,
-        businessType: seller.businessType,
-        location: seller.location,
-        startingPrice: seller.startingPrice,
-        description: seller.description,
-        maxPersonsAllowed: seller.maxPersonsAllowed,
-        amenity: seller.amenity || [],
-        totalHalls: seller.totalHalls || 1,
-        enquiryDetails: seller.enquiryDetails || '',
-        bookingOpens: seller.bookingOpens || '',
-        workingTimes: seller.workingTimes || '',
-        workingDates: seller.workingDates || '',
-        foodType: seller.foodType || [],
-        roomsAvailable: seller.roomsAvailable || 1,
-        bookingPolicy: seller.bookingPolicy || '',
-        additionalFeatures: seller.additionalFeatures || [],
-        images: seller.images || [],
-        profileImage: seller.profileImage || null,
-        createdAt: seller.createdAt,
-        verified: seller.verified,
-        blocked: seller.blocked,
-        approved: seller.approved
-      }
-    });
-  } catch (error) {
-    console.error('Seller login error:', error);
-    res.status(500).json({ success: false, message: 'Error logging in' });
-  }
-};
-
 // Get seller profile (JWT protected)
 exports.getProfile = async (req, res) => {
   try {
@@ -931,4 +906,65 @@ exports.incrementViews = async (req, res) => {
     });
   }
 };
+// Paste this right below exports.register in sellerAuthController.js
+exports.login = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ success: false, message: 'Email and password are required' });
+    }
 
+    const normalizedEmail = email.toLowerCase().trim();
+    const seller = await Seller.findOne({ email: normalizedEmail });
+    if (!seller) {
+      return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    }
+
+    const isMatch = await seller.comparePassword(password);
+    if (!isMatch) {
+      return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    }
+
+    const token = jwt.sign(
+      { id: seller._id, email: seller.email, businessName: seller.businessName, type: 'seller', isSeller: true },
+      process.env.JWT_SECRET_SELLER || 'your-secret-key',
+      { expiresIn: '30d' }
+    );
+
+    res.json({
+      success: true,
+      message: 'Login successful',
+      token,
+      seller
+    });
+  } catch (error) {
+    console.error('Seller login error:', error);
+    res.status(500).json({ success: false, message: 'Error logging in' });
+  }
+};
+
+// --- FIXED UNIFIED EXPORTS OBJECT ---
+module.exports = {
+  register: Object.getOwnPropertyDescriptor(exports, 'register') ? exports.register : async (req, res) => {},
+  getProfile: exports.getProfile,
+  updateProfile: exports.updateProfile,
+  uploadImages: exports.uploadImages,
+  uploadProfileImage: exports.uploadProfileImage,
+  deleteImage: exports.deleteImage,
+  deleteImageAdmin: exports.deleteImageAdmin,
+  deleteProfileImageAdmin: exports.deleteProfileImageAdmin,
+  getAllSellers: exports.getAllSellers,
+  getApprovedVenues: exports.getApprovedVenues,
+  updateUniqueFields: exports.updateUniqueFields,
+  listAllSellers: exports.listAllSellers,
+  test: exports.test,
+  getSellerById: exports.getSellerById,
+  setBlockedStatus: exports.setBlockedStatus,
+  setApprovalStatus: exports.setApprovalStatus,
+  deleteSeller: exports.deleteSeller,
+  updateSellerProfile: exports.updateSellerProfile,
+  incrementViews: exports.incrementViews
+};
+
+// Map everything directly back to module.exports so Node doesn't lose references
+Object.assign(module.exports, exports);

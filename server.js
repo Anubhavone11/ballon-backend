@@ -1,5 +1,6 @@
 // File: admin/backend/server.js
 require('dotenv').config();
+const http = require('http');
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
@@ -14,6 +15,7 @@ const lovedRoutes = require('./routes/loved'); // Assuming your loved routes are
 const categoryRoutes = require('./routes/category');
 const featuredProductRoutes = require('./routes/featuredProduct');
 const bestSellerRoutes = require('./routes/bestSeller');
+const bookingRoutes = require("./routes/bookingRoutes");
 const cartRoutes = require('./routes/cart');
 const fs = require('fs');
 const heroCarouselRoutes = require('./routes/heroCarousel');
@@ -21,6 +23,8 @@ const sellerRoutes = require('./routes/seller');
 const couponRoutes = require('./routes/coupon');
 const crypto = require('crypto');
 const settingsController = require('./controllers/settingsController');
+const { initSocket } = require('./socket'); // Socket.io setup (replaces Pusher)
+const { startMatchmakingSweep } = require('./controllers/matchmakingSweep'); // Expires stale seller offers
 const app = express();
 const subCategoryRoutes = require('./routes/subCategoryRoutes'); // Adjust path if needed
 const blogRoutes = require('./routes/blog');
@@ -136,8 +140,14 @@ app.use('/decoryy/data', (req, res, next) => {
   maxAge: '1h'
 }));
 
-// MongoDB Connection URL from environment variable
-const MONGODB_URI = process.env.MONGODB_URI || "mongodb+srv://lightyagami98k:UN1cr0DnJwISvvgs@cluster0.uwkswmj.mongodb.net/ballon?retryWrites=true&w=majority&appName=Cluster0";
+// MongoDB Connection URL — must come from the environment. No hardcoded
+// fallback: a real credential should never live in source control.
+const MONGODB_URI = process.env.MONGODB_URI;
+
+if (!MONGODB_URI) {
+  console.error('MONGODB_URI is not set. Refusing to start without a database connection string.');
+  process.exit(1);
+}
 
 // API Routes - Define routes (but don't start server yet)
 app.use("/api/shop", shopRoutes);
@@ -168,7 +178,7 @@ app.use('/api/addons', require('./routes/addon'));
 app.use('/api/videos', require('./routes/video'));
 // This handles requests like GET /api/categories/:id/subcategories
 app.use('/api/categories', subCategoryRoutes);
-
+app.use("/api/bookings", bookingRoutes);
 // This handles requests like PUT /api/subcategories/:id
 app.use('/api', subCategoryRoutes); // A bit broad, but will work.
 // Health check endpoint
@@ -204,6 +214,11 @@ app.use((err, req, res, next) => {
 // Port from environment variable
 const PORT = process.env.PORT || 5175;
 
+// Wrap Express in a plain http.Server so Socket.io can attach to the same
+// port (no separate process or paid real-time service needed).
+const httpServer = http.createServer(app);
+initSocket(httpServer);
+mongoose.set('autoIndex', true);
 // Async function to start server after MongoDB connection
 async function startServer() {
   try {
@@ -215,7 +230,7 @@ async function startServer() {
       serverSelectionTimeoutMS: 15000, // Increase timeout to 15 seconds
       socketTimeoutMS: 45000,
     });
-    console.log("MongoDB connected successfully to:", MONGODB_URI);
+    console.log("MongoDB connected successfully");
 
     // Initialize default settings after DB connection
     try {
@@ -225,8 +240,13 @@ async function startServer() {
       console.error('Failed to initialize default settings:', error);
     }
 
-    // Now start the server
-    app.listen(PORT, () => {
+    // Start the background job that expires stale seller offers
+    // (instant-booking matchmaking — see jobs/matchmakingSweep.js)
+    startMatchmakingSweep();
+    console.log('Matchmaking sweep job started');
+
+    // Now start the server (http server, not app — Socket.io needs this)
+    httpServer.listen(PORT, () => {
       console.log(`Server is running on port ${PORT}`);
       console.log('Server is ready to accept requests');
     });
@@ -239,7 +259,3 @@ async function startServer() {
 
 // Start the server
 startServer();
-
-
-
-
