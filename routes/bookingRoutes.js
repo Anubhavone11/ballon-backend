@@ -20,6 +20,11 @@ router.post(
   userAuth,
   bookingController.createScheduledBooking
 );
+router.get(
+  "/user/history",
+  userAuth,
+  bookingController.getUserBookings
+);
 
 // Lets the customer frontend poll booking/offer status
 router.get(
@@ -48,11 +53,15 @@ router.get(
   "/reject/:bookingId",
   bookingController.rejectBooking
 );
-
+router.patch(
+  "/seller-cancel/:bookingId",
+  sellerAuth, //  Replaces generic auth so seller_jwt works perfectly
+  bookingController.sellerCancelBooking
+);
 // Keep this as PATCH/auth because this is hit natively inside your authenticated Partner App dashboard framework
 router.patch(
   "/complete/:bookingId",
-  auth,
+  sellerAuth,
   bookingController.completeBooking
 );
 

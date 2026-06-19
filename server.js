@@ -29,7 +29,7 @@ const app = express();
 const subCategoryRoutes = require('./routes/subCategoryRoutes'); // Adjust path if needed
 const blogRoutes = require('./routes/blog');
 const videoRoutes = require('./routes/video');
-
+const adminBookingRoutes = require('./routes/adminBookingRoutes');
 
 // Generate a random JWT secret for seller authentication if not provided
 if (!process.env.JWT_SECRET_SELLER) {
@@ -155,7 +155,8 @@ app.use("/api/products", productRoutes);
 app.use("/api/orders", orderRoutes);
 app.use('/api/bestseller', bestSellerRoutes);
 app.use('/api/auth', authRoutes);
-app.use('/api/admin/auth', adminAuthRoutes); // Admin authentication routes
+app.use('/api/admin/auth', adminAuthRoutes); // Admin authentication routes\
+app.use('/api/admin/bookings', adminBookingRoutes);
 app.use('/api/loved', lovedRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/featured-products', featuredProductRoutes);

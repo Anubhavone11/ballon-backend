@@ -719,5 +719,40 @@
     "updatedAt": "2025-11-25T10:20:07.817Z",
     "__v": 0,
     "id": "692582d7269b2b52df76f145"
+  },
+  {
+    "customOrderId": "decorationcelebration1",
+    "customerName": "Bikash Sharma",
+    "email": "bikashsharma5151@gmail.com",
+    "phone": "919608431634",
+    "address": {
+      "street": "Sector 28",
+      "pincode": "802302",
+      "country": "India"
+    },
+    "scheduledDelivery": null,
+    "items": [
+      {
+        "productId": "68ab35517d6a677888a89687",
+        "name": "Wedding Backdrop Curtain with LED Lights",
+        "price": 3499,
+        "quantity": 1,
+        "image": "https://res.cloudinary.com/dbwizqyzg/image/upload/v1756209228/pawnshop-products/x3atrqj6svogjy6axya4.png"
+      }
+    ],
+    "addOns": [],
+    "totalAmount": 3499,
+    "paymentMethod": "cod",
+    "orderStatus": "processing",
+    "paymentStatus": "pending",
+    "upfrontAmount": 0,
+    "remainingAmount": 3499,
+    "sellerToken": "",
+    "commission": 0,
+    "_id": "6a34367b41b77e961b045fdf",
+    "createdAt": "2026-06-18T18:18:35.180Z",
+    "updatedAt": "2026-06-18T18:18:35.180Z",
+    "__v": 0,
+    "id": "6a34367b41b77e961b045fdf"
   }
 ]

@@ -23,7 +23,9 @@ router.get('/venues', sellerAuthController.getApprovedVenues);
 
 // Public route to increment seller views (no authentication required)
 router.post('/:id/view', sellerAuthController.incrementViews);
-
+router.get('/bookings', sellerAuth, sellerAuthController.getSellerAssignedBookings);
+// Toggle availability (isAllocated status)
+router.patch('/toggle-allocation', sellerAuth, sellerAuthController.toggleAllocationStatus);
 // Profile routes (using JWT authentication)
 router.get('/profile', sellerAuth, sellerAuthController.getProfile);
 router.put('/profile', sellerAuth, sellerAuthController.updateProfile);
