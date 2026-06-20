@@ -1,0 +1,12 @@
+2026/06/19-18:03:09.979 62c0 Reusing MANIFEST D:\decor_backend\ballon-backend\.wwebjs_auth\session\Default\Local Storage\leveldb/MANIFEST-000001
+2026/06/19-18:03:09.992 62c0 Recovering log #3
+2026/06/19-18:03:09.997 62c0 Reusing old log D:\decor_backend\ballon-backend\.wwebjs_auth\session\Default\Local Storage\leveldb/000003.log 
+2026/06/19-21:24:27.102 46d0 Level-0 table #5: started
+2026/06/19-21:24:27.117 46d0 Level-0 table #5: 21227 bytes OK
+2026/06/19-21:24:27.122 46d0 Delete type=0 #3
+2026/06/20-11:15:06.806 46d0 Level-0 table #7: started
+2026/06/20-11:15:06.822 46d0 Level-0 table #7: 14214 bytes OK
+2026/06/20-11:15:06.827 46d0 Delete type=0 #4
+2026/06/20-14:36:22.100 46d0 Level-0 table #9: started
+2026/06/20-14:36:22.118 46d0 Level-0 table #9: 14651 bytes OK
+2026/06/20-14:36:22.127 46d0 Delete type=0 #6

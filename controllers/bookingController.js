@@ -1,20 +1,16 @@
+// controllers/bookingController.js (Top half snippet update)
 const mongoose = require("mongoose");
 const Booking = require("../models/Booking");
 const Seller = require("../models/Seller");
-const twilio = require('twilio');
+const whatsappClient = require("../config/whatsapp"); // ◄ Handshake your free shared client hook here
 
 // =========================================================================
 // PRODUCTION CONFIGURATION CEILINGS
 // =========================================================================
 const OFFER_TIMEOUT_MS = parseInt(process.env.MATCHMAKING_OFFER_TIMEOUT_MS, 10) || 60000;
-
-// Dynamic Progressive Search Parameters (Meters)
-const METRO_INNER_RADIUS = parseInt(process.env.METRO_INNER_RADIUS, 10) || 15000;   // Ring 1: 15km
-const METRO_MAX_CUTOFF = parseInt(process.env.METRO_MAX_CUTOFF, 10) || 40000;       // Ring 2: 40km (Absolute City Limit)
-
-// Maximum capping limits for concurrent message dispatching threads
+const METRO_INNER_RADIUS = parseInt(process.env.METRO_INNER_RADIUS, 10) || 15000;   
+const METRO_MAX_CUTOFF = parseInt(process.env.METRO_MAX_CUTOFF, 10) || 40000;       
 const ABSOLUTE_MAX_BROADCAST_LIMIT = parseInt(process.env.ABSOLUTE_MAX_BROADCAST_LIMIT, 10) || 8;
-
 const ACTIVE_STATUSES = ["seller_assigned", "cancelled", "completed"];
 
 // =========================================================================
@@ -26,7 +22,6 @@ const isValidCoordinate = (lat, lng) =>
   lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
 
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
-
 const EARTH_RADIUS_METERS = 6371000;
 const toRadians = (deg) => (deg * Math.PI) / 180;
 
@@ -39,27 +34,27 @@ const haversineDistanceMeters = (lat1, lng1, lat2, lng2) => {
 };
 
 // =========================================================================
-// REAL NOTIFICATION SYSTEM (Twilio Outbound WhatsApp Engine)
+// FREE NOTIFICATION ENGINE (Bypasses Twilio Paid Pipelines via WS Headless Pipe)
 // =========================================================================
 const sendJobOfferToSeller = async (seller, bookingData) => {
   try {
-    const accountSid = process.env.TWILIO_ACCOUNT_SID;
-    const authToken = process.env.TWILIO_AUTH_TOKEN;
-    const twilioNumber = process.env.TWILIO_PHONE_NUMBER;
-    const domain = process.env.PRODUCTION_DOMAIN || "http://localhost:5175";
+    if (!seller || !seller.phone) return false;
 
-    if (!accountSid || !authToken || !twilioNumber) {
+    // 🛠️ Guard Shield: Fall back to console logs if WhatsApp isn't fully synced yet
+    if (!whatsappClient.isReady) {
+      console.log(`⚠️ WhatsApp Gateway offline/syncing. Routing fallback console logs for "${seller.businessName}"`);
       return mockConsoleFallback(seller._id, bookingData);
     }
 
-    if (!seller || !seller.phone) return false;
-
-    // Clean formatting for international line targets
     let formattedPhone = seller.phone.trim().replace(/[\s\-()]/g, "");
     if (!formattedPhone.startsWith('+')) {
-      formattedPhone = formattedPhone.startsWith('0') ? `+91${formattedPhone.slice(1)}` : `+91${formattedPhone}`;
+      formattedPhone = formattedPhone.startsWith('0') ? `91${formattedPhone.slice(1)}` : `91${formattedPhone}`;
+    } else {
+      formattedPhone = formattedPhone.replace('+', ''); 
     }
 
+    const whatsappTargetId = `${formattedPhone}@c.us`;
+    const domain = process.env.PRODUCTION_DOMAIN || "http://localhost:5175";
     const bookingId = bookingData._id;
     const currentSellerName = seller.businessName || "Partner Studio";
 
@@ -71,21 +66,14 @@ const sendJobOfferToSeller = async (seller, bookingData) => {
                      `👉 ACCEPT: ${domain}/api/bookings/accept/${bookingId}?sellerId=${seller._id}\n\n` +
                      `❌ DECLINE: ${domain}/api/bookings/reject/${bookingId}?sellerId=${seller._id}`;
 
-    const client = twilio(accountSid, authToken);
-    await client.messages.create({
-      body: textBody,
-      from: `whatsapp:${twilioNumber}`, 
-      to: `whatsapp:${formattedPhone}`   
-    });
-
-    console.log(`✉️ Live Production WhatsApp dispatched to ${currentSellerName} (${formattedPhone})`);
+    await whatsappClient.sendMessage(whatsappTargetId, textBody);
+    console.log(`✉️ Free Web Gateway WhatsApp dispatched to ${currentSellerName} (${formattedPhone})`);
     return true; 
   } catch (error) {
-    console.error(`❌ Twilio production pipeline exception for seller ${seller._id}:`, error.message);
+    console.error(`❌ Headless browser dispatch exception for seller ${seller._id}:`, error.message);
     return false; 
   }
 };
-
 const mockConsoleFallback = async (sellerId, bookingData) => {
   try {
     const seller = await Seller.findById(sellerId);
