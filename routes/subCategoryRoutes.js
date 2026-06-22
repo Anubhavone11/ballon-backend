@@ -1,30 +1,31 @@
 const express = require('express');
 const router = express.Router();
-const Category = require('../models/Category'); // Adjust path if necessary
-const SubCategory = require('../models/SubCategory'); // The new model
+const mongoose = require('mongoose'); // 🛠️ Added mongoose for validation checks
+const Category = require('../models/Category'); 
+const SubCategory = require('../models/SubCategory'); 
 const { handleSubCategoryImage } = require('../middleware/subCategoryUpload');
 
-// Note: It's a good practice to protect these routes with authentication middleware.
-
 // POST - Add a new sub-category to a specific category
-router.post('/:categoryId/subcategories', handleSubCategoryImage, async (req, res) => {
+router.post('/:categoryId/subcategories', handleSubCategoryImage, async (req, res, next) => {
   try {
     const { categoryId } = req.params;
     const { name, description, video, isActive, sortOrder } = req.body;
 
-    // 1. Check if the parent category exists
+    // 🛡️ ANTI-CRASH GATE: If categoryId is a plain text string instead of a Hex ID, pass control along
+    if (!mongoose.Types.ObjectId.isValid(categoryId)) {
+      return next();
+    }
+
     const parentCategory = await Category.findById(categoryId);
     if (!parentCategory) {
       return res.status(404).json({ message: 'Parent category not found' });
     }
 
-    // 2. Handle image upload
     let imageUrl = '';
     if (req.file) {
-      imageUrl = req.file.path; // Cloudinary URL
+      imageUrl = req.file.path; 
     }
 
-    // 3. Create the new sub-category
     const newSubCategory = new SubCategory({
       name,
       description,
@@ -32,7 +33,7 @@ router.post('/:categoryId/subcategories', handleSubCategoryImage, async (req, re
       video,
       isActive,
       sortOrder,
-      parentCategory: categoryId // Link to the parent
+      parentCategory: categoryId 
     });
 
     await newSubCategory.save();
@@ -44,11 +45,15 @@ router.post('/:categoryId/subcategories', handleSubCategoryImage, async (req, re
 
 
 // GET - List all sub-categories of a specific category
-router.get('/:categoryId/subcategories', async (req, res) => {
+router.get('/:categoryId/subcategories', async (req, res, next) => {
   try {
     const { categoryId } = req.params;
 
-    // Check if the parent category exists to give a better error message
+    // 🛡️ ANTI-CRASH GATE: If categoryId isn't a true hex ObjectId, skip this router entirely
+    if (!mongoose.Types.ObjectId.isValid(categoryId)) {
+      return next(); // Passes the request seamlessly down to your products / shop routers
+    }
+
     const parentCategory = await Category.findById(categoryId);
     if (!parentCategory) {
       return res.status(404).json({ message: 'Parent category not found' });
@@ -63,17 +68,19 @@ router.get('/:categoryId/subcategories', async (req, res) => {
 
 
 // PUT - Update a specific sub-category by its ID
-router.put('/subcategories/:subCategoryId', handleSubCategoryImage, async (req, res) => {
+router.put('/subcategories/:subCategoryId', handleSubCategoryImage, async (req, res, next) => {
   try {
     const { subCategoryId } = req.params;
     const updates = { ...req.body };
 
-    // Handle image upload if file is provided
-    if (req.file) {
-      updates.image = req.file.path; // Cloudinary URL
+    if (!mongoose.Types.ObjectId.isValid(subCategoryId)) {
+      return next();
     }
 
-    // The { new: true } option returns the document after the update is applied.
+    if (req.file) {
+      updates.image = req.file.path; 
+    }
+
     const updatedSubCategory = await SubCategory.findByIdAndUpdate(subCategoryId, updates, { new: true, runValidators: true });
 
     if (!updatedSubCategory) {
@@ -88,9 +95,13 @@ router.put('/subcategories/:subCategoryId', handleSubCategoryImage, async (req, 
 
 
 // DELETE - Delete a specific sub-category by its ID
-router.delete('/subcategories/:subCategoryId', async (req, res) => {
+router.delete('/subcategories/:subCategoryId', async (req, res, next) => {
   try {
     const { subCategoryId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(subCategoryId)) {
+      return next();
+    }
 
     const deletedSubCategory = await SubCategory.findByIdAndDelete(subCategoryId);
 
@@ -103,6 +114,5 @@ router.delete('/subcategories/:subCategoryId', async (req, res) => {
     res.status(500).json({ message: 'Error deleting sub-category', error: error.message });
   }
 });
-
 
 module.exports = router;

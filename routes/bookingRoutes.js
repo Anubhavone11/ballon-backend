@@ -32,7 +32,7 @@ router.get(
   userAuth,
   bookingController.getBookingStatus
 );
-
+router.get("/seller/history", sellerAuth, bookingController.getSellerAssignedBookings);
 router.patch(
   "/cancel/:bookingId",
   userAuth,

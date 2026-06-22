@@ -2,9 +2,9 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
 const sellerSchema = new mongoose.Schema({
-  businessName: {
+  name: {
     type: String,
-    required: [true, 'Business name is required'],
+    required: [true, 'Name is required'],
     trim: true
   },
 
@@ -22,9 +22,16 @@ const sellerSchema = new mongoose.Schema({
     minlength: 6
   },
 
-  phone: {
+  businessPhone: {
     type: String,
-    default: ''
+    required: [true, 'Business phone number is required'],
+    trim: true
+  },
+
+  emergencyPhone: {
+    type: String,
+    default: '',
+    trim: true
   },
 
   address: {
@@ -32,12 +39,18 @@ const sellerSchema = new mongoose.Schema({
     default: ''
   },
 
-  businessType: {
+  city: {
     type: String,
-    default: ''
+    required: [true, 'City is required'],
+    trim: true
   },
 
-  // GeoJSON Location
+  state: {
+    type: String,
+    required: [true, 'State is required'],
+    trim: true
+  },
+
   location: {
     type: {
       type: String,
@@ -46,7 +59,7 @@ const sellerSchema = new mongoose.Schema({
     },
     coordinates: {
       type: [Number],
-      default: [0, 0]
+      default: [0, 0] // [longitude, latitude]
     }
   },
 
@@ -55,104 +68,20 @@ const sellerSchema = new mongoose.Schema({
     default: ''
   },
 
-  startingPrice: {
-    type: Number,
-    default: 0
-  },
-
-  maxPersonsAllowed: {
-    type: Number,
-    default: 50
-  },
-
-  amenity: {
-    type: [String],
-    default: []
-  },
-
-  totalHalls: {
-    type: Number,
-    default: 1
-  },
-
-  enquiryDetails: {
-    type: String,
-    default: ''
-  },
-
-  bookingOpens: {
-    type: String,
-    default: ''
-  },
-
-  workingTimes: {
-    type: String,
-    default: ''
-  },
-
-  workingDates: {
-    type: String,
-    default: ''
-  },
-
-  foodType: {
-    type: [String],
-    default: []
-  },
-
-  roomsAvailable: {
-    type: Number,
-    default: 1
-  },
-
-  bookingPolicy: {
-    type: String,
-    default: ''
-  },
-
-  additionalFeatures: {
-    type: [String],
-    default: []
-  },
-
-  included: {
-    type: [String],
-    default: []
-  },
-
-  excluded: {
-    type: [String],
-    default: []
-  },
-
-  faq: [
-    {
-      question: String,
-      answer: String
-    }
-  ],
-
-  images: [
-    {
-      public_id: String,
-      url: String,
-      alt: {
-        type: String,
-        default: 'Seller Image'
-      }
-    }
-  ],
-
-  profileImage: {
+  passportPhoto: {
     public_id: String,
     url: String,
     alt: {
       type: String,
-      default: 'Profile Image'
+      default: 'Passport Size Photo'
     }
   },
 
-  // Matchmaking System
+  isPremium: {
+    type: Boolean,
+    default: false
+  },
+
   isOnline: {
     type: Boolean,
     default: true
@@ -180,14 +109,21 @@ const sellerSchema = new mongoose.Schema({
     default: 0
   },
 
+  // 📈 Bookings System Execution Counters
   completedBookings: {
     type: Number,
-    default: 0
+    default: 0 // ◄ Total orders they completed for customers
   },
 
-  views: {
+  paidBookingsCount: {
     type: Number,
-    default: 0
+    default: 0 // ◄ Total orders they actually paid us for via the Admin panel
+  },
+
+  // 💰 Ledger Financial metrics
+  totalPaymentsReceived: {
+    type: Number,
+    default: 0 // ◄ Total money amount they sent us
   },
 
   verified: {
@@ -211,13 +147,10 @@ const sellerSchema = new mongoose.Schema({
   }
 });
 
-// GeoSpatial Index
 sellerSchema.index({ location: '2dsphere' });
 
-// Password Hashing
 sellerSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();
-
   try {
     const salt = await bcrypt.genSalt(10);
     this.password = await bcrypt.hash(this.password, salt);
@@ -227,7 +160,6 @@ sellerSchema.pre('save', async function (next) {
   }
 });
 
-// Compare Password
 sellerSchema.methods.comparePassword = async function (candidatePassword) {
   return bcrypt.compare(candidatePassword, this.password);
 };

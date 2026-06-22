@@ -7,6 +7,7 @@ const fs = require('fs');
 const { isAdmin, authenticateToken } = require('../middleware/auth');
 const {
   getAllProducts,
+  getInstantProducts, // ⚡ ADDED: Dynamic Instant Filter Controller Method
   getSearchSuggestions,
   getProduct,
   createProductWithFiles,
@@ -84,7 +85,6 @@ const transformPathsToUrls = (req, res, next) => {
     Object.keys(req.files).forEach(key => {
       req.files[key].forEach(file => {
         // Convert absolute path to URL
-        // The file is saved in data/products, which is served at /pawnbackend/data/products
         const filename = file.filename;
         file.path = `${baseUrl}/decoryy/data/products/${filename}`;
       });
@@ -97,6 +97,11 @@ const transformPathsToUrls = (req, res, next) => {
 router.get("/", getAllProducts);
 router.get("/search/suggestions", getSearchSuggestions);
 router.get("/section/:section", getProductsBySection);
+
+// ⚡ NEW: Explicit scope route for getting instant availability products
+// Placing this right above /:id prevents Express from misinterpreting "service" as a product ID
+router.get("/service/instant", getInstantProducts);
+
 router.get("/:id", getProduct);
 
 // Admin routes

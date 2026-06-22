@@ -4,17 +4,25 @@ const mongoose = require('mongoose');
 const fs = require('fs').promises;
 const path = require('path');
 
-// Get all products (supports optional query filters: category (name or id), subCategory (name or id), limit, search, city, page)
+/**
+ * @desc Get all products (supports optional query filters: category, subCategory, limit, search, city, page, instant)
+ * @route GET /api/products
+ */
 const getAllProducts = async (req, res) => {
   try {
-    const { category, subCategory, limit, search, city, page, adminView } = req.query;
+    const { category, subCategory, limit, search, city, page, adminView, instant } = req.query;
+    console.log("getAllProducts endpoint reached with params:", req.query);
 
-    // Base query: only show products that are in stock and have stock > 0
-    // Admin can see everything
+    // Base query: filter for public store views, clear for admin view
     let query = (adminView === 'true' || adminView === true) ? {} : {
       inStock: true,
       stock: { $gt: 0 }
     };
+
+    // Handle Instant query parameter dynamically
+    if (instant === 'true' || instant === true) {
+      query.isInstantAvailable = true;
+    }
 
     // If city provided, resolve it and filter
     let resolvedCityId = null;
@@ -39,29 +47,47 @@ const getAllProducts = async (req, res) => {
       query.name = new RegExp(search.trim(), 'i');
     }
 
-    // Handle category
-    if (category) {
+    // ⚡ SAFE HYBRID CATEGORY SHIELD (Handles ObjectIds, String Names, and Mixed Document Data)
+    if (category && category !== 'undefined' && category !== 'null' && category.trim() !== '') {
       const Category = require('../models/Category');
+      
       if (mongoose.Types.ObjectId.isValid(category)) {
         query.category = category;
       } else {
-        const cat = await Category.findOne({ name: new RegExp(`^${category}$`, 'i') });
-        if (cat) query.category = cat._id;
+        const cat = await Category.findOne({ name: new RegExp(`^${category.trim()}$`, 'i') });
+        if (cat) {
+          // If a category document is found, we query for products containing its ObjectId
+          // OR products containing the exact string fallback name
+          query.$or = [
+            { category: cat._id },
+            { category: category.trim() }
+          ];
+        } else {
+          // Fallback if no matching Category document exists in database
+          query.category = category.trim();
+        }
       }
     }
 
-    // Handle subCategory
-    if (subCategory) {
+    // Handle subCategory (Handles both String Names and ObjectIds)
+    if (subCategory && subCategory !== 'undefined' && subCategory !== 'null' && subCategory.trim() !== '') {
+      const SubCategory = require('../models/SubCategory');
+      
       if (mongoose.Types.ObjectId.isValid(subCategory)) {
         query.subCategory = subCategory;
+      } else {
+        const subCat = await SubCategory.findOne({ name: new RegExp(`^${subCategory.trim()}$`, 'i') });
+        if (subCat) {
+          query.$or = query.$or || [];
+          query.$or.push({ subCategory: subCat._id }, { subCategory: subCategory.trim() });
+        } else {
+          query.subCategory = subCategory.trim();
+        }
       }
     }
 
-    // Execute query with populate
-    let productsQuery = Product.find(query)
-      .populate('category', 'name')
-      .populate('subCategory', 'name')
-      .sort({ date: -1 });
+    // ⚡ FIX: We separate find() from populate() execution streams to handle mixed values safely
+    let productsQuery = Product.find(query).sort({ date: -1 });
 
     const totalCount = await Product.countDocuments(query);
 
@@ -73,7 +99,37 @@ const getAllProducts = async (req, res) => {
       productsQuery = productsQuery.skip(skip).limit(productLimit);
     }
 
+    // Fetch products as plain JavaScript objects
     let products = await productsQuery.lean();
+
+    // ⚡ FIX: Manually resolve populate tasks on text string entries to eliminate 500 CastErrors
+    const CategoryModel = require('../models/Category');
+    const SubCategoryModel = require('../models/SubCategory');
+
+    products = await Promise.all(products.map(async (product) => {
+      // 1. Safe Category Resolution
+      if (product.category) {
+        if (mongoose.Types.ObjectId.isValid(product.category)) {
+          const populatedCat = await CategoryModel.findById(product.category).select('name').lean();
+          product.category = populatedCat || { _id: product.category, name: "Unknown Category" };
+        } else if (typeof product.category === 'string') {
+          // Map legacy text field values seamlessly to match storefront object templates
+          product.category = { name: product.category };
+        }
+      }
+
+      // 2. Safe Subcategory Resolution
+      if (product.subCategory) {
+        if (mongoose.Types.ObjectId.isValid(product.subCategory)) {
+          const populatedSubCat = await SubCategoryModel.findById(product.subCategory).select('name').lean();
+          product.subCategory = populatedSubCat || { _id: product.subCategory, name: "Unknown Subcategory" };
+        } else if (typeof product.subCategory === 'string') {
+          product.subCategory = { name: product.subCategory };
+        }
+      }
+
+      return product;
+    }));
 
     // Adjust prices for city if selected
     if (resolvedCityId) {
@@ -92,7 +148,7 @@ const getAllProducts = async (req, res) => {
       });
     }
 
-    res.json({
+    return res.status(200).json({
       success: true,
       products,
       total: totalCount,
@@ -106,7 +162,65 @@ const getAllProducts = async (req, res) => {
 
   } catch (error) {
     console.error('Error fetching products:', error);
-    res.status(500).json({ success: false, message: "Error fetching products", error: error.message });
+    return res.status(500).json({ success: false, message: "Error fetching products", error: error.message });
+  }
+};
+/**
+ * @desc Get all products filtered explicitly by instant availability
+ * @route GET /api/products/service/instant
+ */
+const getInstantProducts = async (req, res) => {
+  try {
+    const { city } = req.query;
+ console.log("instant");
+    let query = {
+      inStock: true,
+      stock: { $gt: 0 },
+      isInstantAvailable: true
+    };
+
+    let resolvedCityId = null;
+    if (city && city !== 'null' && city !== 'undefined') {
+      if (mongoose.Types.ObjectId.isValid(city)) {
+        resolvedCityId = city;
+      } else {
+        const City = require('../models/City');
+        const cityDoc = await City.findOne({ name: new RegExp(`^${city.trim()}$`, 'i') });
+        if (cityDoc) resolvedCityId = cityDoc._id;
+      }
+      if (resolvedCityId) query.cities = resolvedCityId;
+    }
+
+    let products = await Product.find(query)
+      .populate('category', 'name')
+      .populate('subCategory', 'name')
+      .sort({ date: -1 })
+      .lean();
+
+    if (resolvedCityId) {
+      products = products.map(product => {
+        if (product.cityPrices && Array.isArray(product.cityPrices)) {
+          const cityPrice = product.cityPrices.find(cp => cp.city && cp.city.toString() === resolvedCityId.toString());
+          if (cityPrice) {
+            return {
+              ...product,
+              price: cityPrice.price,
+              regularPrice: cityPrice.regularPrice
+            };
+          }
+        }
+        return product;
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      count: products.length,
+      products
+    });
+  } catch (error) {
+    console.error('Error fetching instant products:', error);
+    return res.status(500).json({ success: false, message: "Error fetching instant products", error: error.message });
   }
 };
 
@@ -121,9 +235,6 @@ const getSearchSuggestions = async (req, res) => {
 
     const searchTerm = query.trim();
     const searchWords = searchTerm.split(/\s+/).filter(word => word.length > 0);
-    const regexPatterns = searchWords.map(word =>
-      new RegExp(word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
-    );
 
     // Base query for products
     const productQuery = {
@@ -240,6 +351,8 @@ const getSearchSuggestions = async (req, res) => {
           price: 1,
           image: 1,
           cityPrices: 1,
+          isInstantAvailable: 1,
+          instantDeliveryTime: 1,
           category: { $arrayElemAt: ['$categoryInfo', 0] },
           subCategory: { $arrayElemAt: ['$subCategoryInfo', 0] },
           relevanceScore: 1
@@ -295,6 +408,8 @@ const getSearchSuggestions = async (req, res) => {
         name: product.name,
         price: displayPrice,
         image: product.image,
+        isInstantAvailable: product.isInstantAvailable,
+        instantDeliveryTime: product.instantDeliveryTime,
         category: product.category?.name,
         subCategory: product.subCategory?.name
       });
@@ -319,7 +434,6 @@ const getProductsBySection = async (req, res) => {
     const { city } = req.query;
 
     let query = {
-      // Only show in-stock products
       inStock: true,
       stock: { $gt: 0 }
     };
@@ -332,7 +446,6 @@ const getProductsBySection = async (req, res) => {
       if (mongoose.Types.ObjectId.isValid(city)) {
         cityId = city;
       } else {
-        // Try to find city by name
         const cityDoc = await City.findOne({ name: new RegExp(`^${city}$`, 'i') });
         if (cityDoc) {
           cityId = cityDoc._id;
@@ -340,7 +453,6 @@ const getProductsBySection = async (req, res) => {
       }
 
       if (cityId) {
-        // Find ONLY products that have this city in their cities array
         query.cities = cityId;
       }
     }
@@ -359,14 +471,11 @@ const getProductsBySection = async (req, res) => {
         return res.status(400).json({ message: "Invalid section" });
     }
 
-    // UPDATED: Populate category and subCategory for section-based queries
     let products = await Product.find(query)
       .populate('category', 'name')
       .populate('subCategory', 'name');
 
-    // If city is provided, adjust prices for each product based on cityPrices
     if (city) {
-      // Find city ID if not already a valid ObjectId
       let cityId = city;
       if (!mongoose.Types.ObjectId.isValid(city)) {
         const City = require('../models/City');
@@ -405,16 +514,13 @@ const getProduct = async (req, res) => {
     const { id } = req.params;
     let product;
 
-    // Try to find by MongoDB ID first
     if (mongoose.Types.ObjectId.isValid(id)) {
       product = await Product.findById(id)
         .populate('category', 'name slug')
         .populate('subCategory', 'name slug');
     }
 
-    // If not found by ID or ID is invalid, try to find by name (URL-decoded and slug-to-name conversion)
     if (!product) {
-      // Convert slug back to searchable name (replace hyphens with spaces and make case-insensitive)
       const nameFromSlug = decodeURIComponent(id).replace(/-/g, ' ');
       product = await Product.findOne({
         name: new RegExp(`^${nameFromSlug}$`, 'i')
@@ -427,7 +533,6 @@ const getProduct = async (req, res) => {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    // If city is provided, adjust prices
     const { city } = req.query;
     if (city) {
       let cityId = city;
@@ -459,12 +564,7 @@ const getProduct = async (req, res) => {
 const createProductWithFiles = async (req, res) => {
   try {
     console.log('=== Product Creation Request ===');
-    console.log('Request body:', req.body);
-    console.log('Request files:', req.files);
-    console.log('Request headers:', req.headers);
-
     if (!req.files || !req.files.mainImage) {
-      console.error('Main image missing - files:', req.files);
       return res.status(400).json({
         error: 'Main image is required.',
         message: 'Please upload a main image for the product'
@@ -485,23 +585,17 @@ const createProductWithFiles = async (req, res) => {
       return res.status(400).json({ error: `Missing required fields: ${missingFields.join(', ')}` });
     }
 
-    // Validate price values
     const price = parseFloat(productData.price);
     const regularPrice = parseFloat(productData.regularPrice);
 
-    if (isNaN(price) || price < 0) {
+    if (isNaN(price) || price < 0 || isNaN(regularPrice) || regularPrice < 0) {
       return res.status(400).json({ error: 'Invalid price value' });
-    }
-
-    if (isNaN(regularPrice) || regularPrice < 0) {
-      return res.status(400).json({ error: 'Invalid regular price value' });
     }
 
     if (price > regularPrice) {
       return res.status(400).json({ error: 'Price cannot be greater than regular price' });
     }
 
-    // Validate stock value
     const stock = Number(productData.stock);
     if (isNaN(stock) || stock < 0) {
       return res.status(400).json({ error: 'Invalid stock value' });
@@ -517,16 +611,13 @@ const createProductWithFiles = async (req, res) => {
       }
     }
 
-    console.log('=== Creating Product Object ===');
     const productObject = {
       name: productData.name,
       material: productData.material,
-
       size: productData.size,
       colour: productData.colour,
       category: productData.category,
       subCategory: productData.subCategory && productData.subCategory.trim() !== '' ? productData.subCategory : undefined,
-
       utility: productData.utility,
       care: productData.care,
       included: productData.included ? JSON.parse(productData.included) : [],
@@ -541,17 +632,17 @@ const createProductWithFiles = async (req, res) => {
       isMostLoved: productData.isMostLoved === 'true',
       codAvailable: productData.codAvailable !== 'false',
       stock: Number(productData.stock) || 0,
+
+      // ⚡ NEW: Instant Decor fields extraction
+      isInstantAvailable: productData.isInstantAvailable === 'true' || productData.isInstantAvailable === true,
+      instantDeliveryTime: productData.instantDeliveryTime || "2 hr",
+
       cities: productData.cities ? (typeof productData.cities === 'string' ? JSON.parse(productData.cities) : productData.cities) : [],
       cityPrices: productData.cityPrices ? (typeof productData.cityPrices === 'string' ? JSON.parse(productData.cityPrices) : productData.cityPrices) : []
     };
 
-    console.log('Product object to save:', productObject);
-
     const newProduct = new Product(productObject);
-    console.log('Product instance created, attempting to save...');
-
     const savedProduct = await newProduct.save();
-    console.log('Product saved successfully:', savedProduct._id);
 
     res.status(201).json({
       message: "Product created successfully",
@@ -559,43 +650,11 @@ const createProductWithFiles = async (req, res) => {
     });
   } catch (error) {
     console.error('=== Error creating product ===');
-    console.error('Error type:', error.name);
-    console.error('Error message:', error.message);
-    console.error('Error stack:', error.stack);
-    console.error('Request body:', req.body);
-    console.error('Request files:', req.files);
-
-    // Handle specific error types
     if (error.name === 'ValidationError') {
       const validationErrors = Object.values(error.errors).map(err => err.message);
-      return res.status(400).json({
-        message: "Validation Error",
-        error: "Please check the following fields: " + validationErrors.join(', '),
-        details: validationErrors
-      });
+      return res.status(400).json({ message: "Validation Error", error: validationErrors.join(', ') });
     }
-
-    if (error.name === 'CastError') {
-      return res.status(400).json({
-        message: "Invalid Data Type",
-        error: `Invalid value for field: ${error.path}`,
-        details: error.message
-      });
-    }
-
-    if (error.code === 11000) {
-      return res.status(400).json({
-        message: "Duplicate Entry",
-        error: "A product with this information already exists",
-        details: error.message
-      });
-    }
-
-    res.status(500).json({
-      message: "Error creating product",
-      error: error.message,
-      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
-    });
+    res.status(500).json({ message: "Error creating product", error: error.message });
   }
 };
 
@@ -632,8 +691,7 @@ const updateProductWithFiles = async (req, res) => {
       size: productData.size || existingProduct.size,
       colour: productData.colour || existingProduct.colour,
       category: productData.category || existingProduct.category,
-      subCategory: productData.subCategory && productData.subCategory.trim() !== '' ? productData.subCategory : (productData.subCategory === '' ? undefined : existingProduct.subCategory), // Handle empty string
-
+      subCategory: productData.subCategory && productData.subCategory.trim() !== '' ? productData.subCategory : (productData.subCategory === '' ? undefined : existingProduct.subCategory),
       utility: productData.utility || existingProduct.utility,
       care: productData.care || existingProduct.care,
       included: productData.included ? JSON.parse(productData.included) : existingProduct.included,
@@ -648,6 +706,11 @@ const updateProductWithFiles = async (req, res) => {
       isMostLoved: productData.isMostLoved !== undefined ? (productData.isMostLoved === 'true') : existingProduct.isMostLoved,
       codAvailable: productData.codAvailable !== undefined ? (productData.codAvailable !== 'false') : existingProduct.codAvailable,
       stock: productData.stock !== undefined ? Number(productData.stock) : existingProduct.stock,
+
+      // ⚡ NEW: Instant Decor fields alignment updates
+      isInstantAvailable: productData.isInstantAvailable !== undefined ? (productData.isInstantAvailable === 'true' || productData.isInstantAvailable === true) : existingProduct.isInstantAvailable,
+      instantDeliveryTime: productData.instantDeliveryTime !== undefined ? productData.instantDeliveryTime : existingProduct.instantDeliveryTime,
+
       cities: productData.cities ? (typeof productData.cities === 'string' ? JSON.parse(productData.cities) : productData.cities) : existingProduct.cities,
       cityPrices: productData.cityPrices ? (typeof productData.cityPrices === 'string' ? JSON.parse(productData.cityPrices) : productData.cityPrices) : existingProduct.cityPrices
     };
@@ -663,52 +726,28 @@ const updateProductWithFiles = async (req, res) => {
 // Update product section flags
 const updateProductSections = async (req, res) => {
   try {
-    console.log('=== Starting Section Update ===');
-    console.log('Product ID:', req.params.id);
-    console.log('Update data:', req.body);
-
     const { id } = req.params;
     const { isBestSeller, isTrending, isMostLoved } = req.body;
 
-    // Validate that at least one section flag is provided
     if (isBestSeller === undefined && isTrending === undefined && isMostLoved === undefined) {
-      console.log('Error: No section flags provided');
       return res.status(400).json({ message: "At least one section flag must be provided" });
     }
 
-    // Find the product
     const product = await Product.findById(id);
     if (!product) {
-      console.log('Error: Product not found');
       return res.status(404).json({ message: "Product not found" });
     }
 
-    console.log('Current product sections:', {
-      isBestSeller: product.isBestSeller,
-      isTrending: product.isTrending,
-      isMostLoved: product.isMostLoved
-    });
-
-    // Build update object with only the provided flags
     const updates = {};
     if (isBestSeller !== undefined) updates.isBestSeller = isBestSeller;
     if (isTrending !== undefined) updates.isTrending = isTrending;
     if (isMostLoved !== undefined) updates.isMostLoved = isMostLoved;
 
-    console.log('Applying updates:', updates);
-
-    // Update the product with new section flags
     const updatedProduct = await Product.findByIdAndUpdate(
       id,
       { $set: updates },
       { new: true, runValidators: true }
     );
-
-    console.log('Updated product sections:', {
-      isBestSeller: updatedProduct.isBestSeller,
-      isTrending: updatedProduct.isTrending,
-      isMostLoved: updatedProduct.isMostLoved
-    });
 
     res.json({
       message: "Product sections updated successfully",
@@ -716,13 +755,7 @@ const updateProductSections = async (req, res) => {
     });
   } catch (error) {
     console.error('=== Error Updating Sections ===');
-    console.error('Error details:', error);
-    console.error('Stack trace:', error.stack);
-    res.status(500).json({
-      message: "Error updating product sections",
-      error: error.message,
-      details: error.stack
-    });
+    res.status(500).json({ message: "Error updating product sections", error: error.message });
   }
 };
 
@@ -744,6 +777,7 @@ const deleteProduct = async (req, res) => {
 
 module.exports = {
   getAllProducts,
+  getInstantProducts, // Exported to routing channel
   getSearchSuggestions,
   getProductsBySection,
   getProduct,
@@ -751,4 +785,4 @@ module.exports = {
   updateProductWithFiles,
   updateProductSections,
   deleteProduct
-}; 
+};

@@ -1,4 +1,3 @@
-// File: admin/backend/server.js
 require('dotenv').config();
 const http = require('http');
 const express = require("express");
@@ -6,30 +5,36 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 const path = require("path");
 const cookieParser = require("cookie-parser");
+const fs = require('fs');
+const crypto = require('crypto');
+
+// Route Imports
 const shopRoutes = require("./routes/shop");
 const productRoutes = require("./routes/products");
 const orderRoutes = require("./routes/orders");
-const authRoutes = require('./routes/auth'); // Assuming your auth routes are here
-const adminAuthRoutes = require('./routes/adminAuth'); // Admin authentication routes
-const lovedRoutes = require('./routes/loved'); // Assuming your loved routes are here
+const authRoutes = require('./routes/auth'); 
+const adminAuthRoutes = require('./routes/adminAuth'); 
+const lovedRoutes = require('./routes/loved'); 
 const categoryRoutes = require('./routes/category');
 const featuredProductRoutes = require('./routes/featuredProduct');
 const bestSellerRoutes = require('./routes/bestSeller');
 const bookingRoutes = require("./routes/bookingRoutes");
 const cartRoutes = require('./routes/cart');
-const fs = require('fs');
 const heroCarouselRoutes = require('./routes/heroCarousel');
 const sellerRoutes = require('./routes/seller');
 const couponRoutes = require('./routes/coupon');
-const crypto = require('crypto');
-const settingsController = require('./controllers/settingsController');
-const { initSocket } = require('./socket'); // Socket.io setup (replaces Pusher)
-const { startMatchmakingSweep } = require('./controllers/matchmakingSweep'); // Expires stale seller offers
-const app = express();
-const subCategoryRoutes = require('./routes/subCategoryRoutes'); // Adjust path if needed
+const subCategoryRoutes = require('./routes/subCategoryRoutes'); 
 const blogRoutes = require('./routes/blog');
 const videoRoutes = require('./routes/video');
 const adminBookingRoutes = require('./routes/adminBookingRoutes');
+const voiceRoutes = require('./routes/voiceRoutes');
+
+// Controllers & Global Services
+const settingsController = require('./controllers/settingsController');
+const { initSocket } = require('./socket'); 
+const { startMatchmakingSweep } = require('./controllers/matchmakingSweep'); 
+
+const app = express();
 
 // Generate a random JWT secret for seller authentication if not provided
 if (!process.env.JWT_SECRET_SELLER) {
@@ -41,25 +46,20 @@ if (!process.env.JWT_SECRET_SELLER) {
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:5174',
-
-  'http://localhost:5175', // Backend port (for testing)
+  'http://localhost:5175', 
   'https://www.decoryy.com',
   'https://ballon-frontend.vercel.app',
   'https://ballon-admin-beta.vercel.app',
   'https://admin.decoryy.com'
 ];
 
-
-
 app.use(cors({
   origin: function (origin, callback) {
-
     if (!origin) {
       console.log('No origin header, allowing request');
       return callback(null, true);
     }
     if (allowedOrigins.includes(origin)) {
-
       callback(null, true);
     } else {
       console.log('CORS blocked origin:', origin);
@@ -106,24 +106,27 @@ app.use((err, req, res, next) => {
   next(err);
 });
 
-// Ensure data directories exist
+// Ensure data directories exist explicitly
 const dataDir = path.join(__dirname, 'data');
 const userProductDir = path.join(dataDir, 'userproduct');
+const productUploadsDir = path.join(dataDir, 'products'); 
+const sellerProfilesDir = path.join(dataDir, 'seller-profiles'); // ⚡ ADDED: Seller profile directory path parameter
 
-// Create directories if they don't exist
-[dataDir, userProductDir].forEach(dir => {
+[dataDir, userProductDir, productUploadsDir, sellerProfilesDir].forEach(dir => {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
     console.log('Created directory:', dir);
   }
 });
 
-// Serve static files with proper MIME types
+// Static Media Delivery Pipeline Configuration
+app.use('/decoryy/data/products', express.static(productUploadsDir, { maxAge: '1h' }));
+app.use('/data/seller-profiles', express.static(sellerProfilesDir, { maxAge: '1h' })); // ⚡ ADDED: Native static file server mounting for vendor images
+
 app.use('/decoryy/data', (req, res, next) => {
   const filePath = path.join(__dirname, 'data', req.path);
   const ext = path.extname(filePath).toLowerCase();
 
-  // Set proper content type for videos and images
   if (ext === '.mp4') {
     res.setHeader('Content-Type', 'video/mp4');
   } else if (ext === '.png') {
@@ -133,29 +136,30 @@ app.use('/decoryy/data', (req, res, next) => {
   } else if (ext === '.gif') {
     res.setHeader('Content-Type', 'image/gif');
   }
-
   next();
 }, express.static(path.join(__dirname, 'data'), {
   fallthrough: true,
   maxAge: '1h'
 }));
 
-// MongoDB Connection URL — must come from the environment. No hardcoded
-// fallback: a real credential should never live in source control.
 const MONGODB_URI = process.env.MONGODB_URI;
-
 if (!MONGODB_URI) {
   console.error('MONGODB_URI is not set. Refusing to start without a database connection string.');
   process.exit(1);
 }
 
-// API Routes - Define routes (but don't start server yet)
-app.use("/api/shop", shopRoutes);
+// =========================================================================
+// 🚀 ROUTING ARCHITECTURE (Specific matches prioritize early, catch-alls sit last)
+// =========================================================================
+
+// Product & Inventory Router Targets (High-priority routes)
+app.use("/api/shop", productRoutes); 
 app.use("/api/products", productRoutes);
+
 app.use("/api/orders", orderRoutes);
 app.use('/api/bestseller', bestSellerRoutes);
 app.use('/api/auth', authRoutes);
-app.use('/api/admin/auth', adminAuthRoutes); // Admin authentication routes\
+app.use('/api/admin/auth', adminAuthRoutes); 
 app.use('/api/admin/bookings', adminBookingRoutes);
 app.use('/api/loved', lovedRoutes);
 app.use('/api/categories', categoryRoutes);
@@ -165,7 +169,8 @@ app.use('/api/hero-carousel', heroCarouselRoutes);
 app.use('/api/seller', sellerRoutes);
 app.use('/api/coupons', couponRoutes);
 app.use('/api/data-page', require('./routes/dataPage'));
-// Register city routes
+
+// Core Operational Modules
 app.use('/api/cities', require('./routes/city'));
 app.use('/api/payment', require('./routes/payment'));
 app.use('/api/withdrawal', require('./routes/withdrawal'));
@@ -177,11 +182,15 @@ app.use('/api/pin-code-service-fees', require('./routes/pinCodeServiceFee'));
 app.use('/api/blog', blogRoutes);
 app.use('/api/addons', require('./routes/addon'));
 app.use('/api/videos', require('./routes/video'));
-// This handles requests like GET /api/categories/:id/subcategories
-app.use('/api/categories', subCategoryRoutes);
 app.use("/api/bookings", bookingRoutes);
-// This handles requests like PUT /api/subcategories/:id
-app.use('/api', subCategoryRoutes); // A bit broad, but will work.
+app.use('/api/voice-gateway', voiceRoutes);
+
+// Specific Sub-categories Route
+app.use('/api/categories', subCategoryRoutes);
+
+// Wildcard catch-all route placed safely at the very bottom
+app.use('/api', subCategoryRoutes); 
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({
@@ -204,36 +213,35 @@ app.get('/test-cors', (req, res) => {
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  console.error('Error:', err);
-  console.error('Stack:', err.stack);
+  console.error('Error:', err.message);
   res.status(500).json({
     message: 'Something went wrong!',
     error: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error'
   });
 });
 
-// Port from environment variable
 const PORT = process.env.PORT || 5175;
 
-// Wrap Express in a plain http.Server so Socket.io can attach to the same
-// port (no separate process or paid real-time service needed).
+// Initialize Server and extract Socket connection layer
 const httpServer = http.createServer(app);
-initSocket(httpServer);
+const io = initSocket(httpServer);
+
+// ⚡ Dynamic Binding: Make Socket IO instance queryable globally inside any Controller request
+app.set("socketio", io);
+
 mongoose.set('autoIndex', true);
-// Async function to start server after MongoDB connection
+
 async function startServer() {
   try {
-    // Connect to MongoDB first and wait for connection
     console.log('Connecting to MongoDB...');
     await mongoose.connect(MONGODB_URI, {
       useNewUrlParser: true,
       useUnifiedTopology: true,
-      serverSelectionTimeoutMS: 15000, // Increase timeout to 15 seconds
+      serverSelectionTimeoutMS: 15000, 
       socketTimeoutMS: 45000,
     });
     console.log("MongoDB connected successfully");
 
-    // Initialize default settings after DB connection
     try {
       await settingsController.initializeDefaultSettings();
       console.log('Default settings initialized successfully');
@@ -241,22 +249,17 @@ async function startServer() {
       console.error('Failed to initialize default settings:', error);
     }
 
-    // Start the background job that expires stale seller offers
-    // (instant-booking matchmaking — see jobs/matchmakingSweep.js)
     startMatchmakingSweep();
     console.log('Matchmaking sweep job started');
 
-    // Now start the server (http server, not app — Socket.io needs this)
     httpServer.listen(PORT, () => {
       console.log(`Server is running on port ${PORT}`);
       console.log('Server is ready to accept requests');
     });
   } catch (error) {
     console.error("Failed to connect to MongoDB:", error);
-    console.error("Server cannot start without database connection");
-    process.exit(1); // Exit if cannot connect to database
+    process.exit(1); 
   }
 }
 
-// Start the server
 startServer();

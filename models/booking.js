@@ -2,41 +2,35 @@ const mongoose = require("mongoose");
 
 const bookingSchema = new mongoose.Schema(
   {
-    // User who created booking
     userId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true
     },
 
-    // Assigned Seller
     sellerId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Seller",
       default: null
     },
 
-    // Seller currently holding an open offer (NEW — used by the matchmaking sweep)
     notifiedSellerId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Seller",
       default: null
     },
 
-    // When the current offer to notifiedSellerId expires (NEW)
     offerExpiresAt: {
       type: Date,
       default: null
     },
 
-    // Instant or Scheduled
     bookingType: {
       type: String,
       enum: ["instant", "scheduled"],
       default: "instant"
     },
 
-    // Booking Status
     status: {
       type: String,
       enum: [
@@ -51,11 +45,17 @@ const bookingSchema = new mongoose.Schema(
       default: "pending_allocation"
     },
 
-    // Service Details
     serviceDetails: {
+      // 🚀 ADDED: Explicit name field as requested
+      name: {
+        type: String,
+        required: [true, "Customer name is required"],
+        trim: true
+      },
+
       decorType: {
         type: String,
-        required: true
+        default: ""
       },
 
       note: {
@@ -74,13 +74,11 @@ const bookingSchema = new mongoose.Schema(
       }
     },
 
-    // Event / Pickup Location
     pickupLocation: {
       address: {
         type: String,
         required: true
       },
-
       coordinates: {
         type: [Number], // [lng, lat]
         required: true,
@@ -88,7 +86,6 @@ const bookingSchema = new mongoose.Schema(
       }
     },
 
-    // Matchmaking Queue
     routingQueue: [
       {
         type: mongoose.Schema.Types.ObjectId,
@@ -101,13 +98,11 @@ const bookingSchema = new mongoose.Schema(
       default: 0
     },
 
-    // Scheduled Booking Date
     scheduledTime: {
       type: Date,
       default: null
     },
 
-    // Pricing
     estimatedPrice: {
       type: Number,
       default: 0
@@ -118,7 +113,6 @@ const bookingSchema = new mongoose.Schema(
       default: 0
     },
 
-    // Payment
     paymentStatus: {
       type: String,
       enum: ["pending", "paid", "failed", "refunded"],
@@ -135,7 +129,6 @@ const bookingSchema = new mongoose.Schema(
       default: ""
     },
 
-    // Timestamps
     acceptedAt: {
       type: Date,
       default: null
@@ -156,13 +149,11 @@ const bookingSchema = new mongoose.Schema(
       default: ""
     },
 
-    // Seller Feedback
     sellerFeedback: {
       type: String,
       default: ""
     },
 
-    // Customer Feedback
     customerFeedback: {
       type: String,
       default: ""
@@ -173,21 +164,25 @@ const bookingSchema = new mongoose.Schema(
       min: 1,
       max: 5,
       default: null
-    }
+    },
+
+    selectedProductId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Product",
+      default: null
+    },
   },
   {
     timestamps: true
   }
 );
 
-// Indexes
 bookingSchema.index({ userId: 1 });
 bookingSchema.index({ sellerId: 1 });
 bookingSchema.index({ status: 1 });
 bookingSchema.index({ bookingType: 1 });
 bookingSchema.index({ createdAt: -1 });
 bookingSchema.index({ scheduledTime: 1 });
-// NEW — lets the matchmaking sweep job find expired offers without a collection scan
 bookingSchema.index({ status: 1, offerExpiresAt: 1 });
 
 module.exports = mongoose.model("Booking", bookingSchema);

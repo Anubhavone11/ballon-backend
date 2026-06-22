@@ -1,8 +1,9 @@
-// controllers/bookingController.js (Top half snippet update)
 const mongoose = require("mongoose");
 const Booking = require("../models/Booking");
 const Seller = require("../models/Seller");
-const whatsappClient = require("../config/whatsapp"); // ◄ Handshake your free shared client hook here
+const Product = require("../models/Product"); 
+const { MessageMedia } = require("whatsapp-web.js"); 
+const whatsappClient = require("../config/whatsapp"); 
 
 // =========================================================================
 // PRODUCTION CONFIGURATION CEILINGS
@@ -34,19 +35,19 @@ const haversineDistanceMeters = (lat1, lng1, lat2, lng2) => {
 };
 
 // =========================================================================
-// FREE NOTIFICATION ENGINE (Bypasses Twilio Paid Pipelines via WS Headless Pipe)
+// FREE NOTIFICATION ENGINE
 // =========================================================================
 const sendJobOfferToSeller = async (seller, bookingData) => {
   try {
-    if (!seller || !seller.phone) return false;
+    // 🛠️ FIX: Target businessPhone instead of phone property
+    if (!seller || !seller.businessPhone) return false;
 
-    // 🛠️ Guard Shield: Fall back to console logs if WhatsApp isn't fully synced yet
     if (!whatsappClient.isReady) {
-      console.log(`⚠️ WhatsApp Gateway offline/syncing. Routing fallback console logs for "${seller.businessName}"`);
-      return mockConsoleFallback(seller._id, bookingData);
+      console.log(`⚠️ WhatsApp Gateway offline. Routing fallback console logs for "${seller.name}"`);
+      return false;
     }
 
-    let formattedPhone = seller.phone.trim().replace(/[\s\-()]/g, "");
+    let formattedPhone = seller.businessPhone.trim().replace(/[\s\-()]/g, "");
     if (!formattedPhone.startsWith('+')) {
       formattedPhone = formattedPhone.startsWith('0') ? `91${formattedPhone.slice(1)}` : `91${formattedPhone}`;
     } else {
@@ -56,49 +57,60 @@ const sendJobOfferToSeller = async (seller, bookingData) => {
     const whatsappTargetId = `${formattedPhone}@c.us`;
     const domain = process.env.PRODUCTION_DOMAIN || "http://localhost:5175";
     const bookingId = bookingData._id;
-    const currentSellerName = seller.businessName || "Partner Studio";
+    const currentSellerName = seller.name || "Partner Studio";
 
-    const textBody = `🚨 *NEW BALLOON DECOR JOB BLAST!* 🚨\n\n` +
-                     ` Store Partner: *${currentSellerName.toUpperCase()}*\n` +
-                     `• Order Type: *${bookingData.serviceDetails.decorType}*\n` +
-                     `• Address: ${bookingData.pickupLocation.address}\n\n` +
-                     `First vendor to click claims the booking:\n\n` +
-                     `👉 ACCEPT: ${domain}/api/bookings/accept/${bookingId}?sellerId=${seller._id}\n\n` +
-                     `❌ DECLINE: ${domain}/api/bookings/reject/${bookingId}?sellerId=${seller._id}`;
+    const itemDetail = bookingData.selectedProductId;
+    let productLineString = "";
+    
+    if (itemDetail) {
+      productLineString = `📦 *Design Asset:* ${itemDetail.name}\n` +
+                          `💰 *Payout:* ₹${itemDetail.price}`;
+    } else {
+      productLineString = `📦 *Design Asset:* Custom Structural Layout Request`;
+    }
+// 🚀 FIXED: URL parameters updated to match your exact format layout (e.g., /api/bookings/accept/ID?sellerId=ID)
+    const textBody = `💼 *DECORYY PARTNER DISPATCH*\n` +
+                     `========================================\n\n` +
+                     `👤 *Client Name:* ${bookingData.serviceDetails.name}\n` +
+                     `✨ *Event Theme:* ${bookingData.serviceDetails.decorType || "Not Specified"}\n` +
+                     `${productLineString}\n` +
+                     `📍 *Venue Location:* ${bookingData.pickupLocation.address}\n\n` +
+                     `========================================\n\n` +
+                     `📥 *ORDER ALLOCATION SYSTEM*\n` +
+                     `Please click one of the secure gateway links below to update status:\n\n` +
+                     `🟢 *[ ACCEPT & SECURE BOOKING ]*\n` +
+                     `http://${domain.replace(/^https?:\/\//, '')}/api/bookings/accept/${bookingId}?sellerId=${seller._id}\n\n` +
+                     `❌ *[ DECLINE / PASS OFFER ]*\n` +
+                     `http://${domain.replace(/^https?:\/\//, '')}/api/bookings/reject/${bookingId}?sellerId=${seller._id}\n\n` +
+                     `⏱️ _Note: This is a single-allocation window. First verified partner to click and confirm locks the schedule slot._`;
+    if (itemDetail && itemDetail.image) {
+      console.log(`📸 Image Asset recognized. Fetching media path: ${itemDetail.image}`);
+      try {
+        const mediaAttachment = await MessageMedia.fromUrl(itemDetail.image, { unsafeMime: true });
+        await whatsappClient.sendMessage(whatsappTargetId, mediaAttachment, { caption: textBody });
+        console.log(`✉️ Media Job Blast successfully dispatched to ${currentSellerName}`);
+        return true;
+      } catch (mediaErr) {
+        console.error(`⚠️ Media asset download failed (${mediaErr.message}). Falling back to text-only.`);
+      }
+    }
 
     await whatsappClient.sendMessage(whatsappTargetId, textBody);
-    console.log(`✉️ Free Web Gateway WhatsApp dispatched to ${currentSellerName} (${formattedPhone})`);
+    console.log(`✉️ Text-only Job Blast successfully dispatched to ${currentSellerName}`);
     return true; 
+
   } catch (error) {
     console.error(`❌ Headless browser dispatch exception for seller ${seller._id}:`, error.message);
     return false; 
   }
 };
-const mockConsoleFallback = async (sellerId, bookingData) => {
-  try {
-    const seller = await Seller.findById(sellerId);
-    const sellerPhone = seller ? seller.phone : "0000000000";
-    const venueName = seller ? seller.businessName : "Unknown Partner";
-    
-    console.log(`\n================================================================`);
-    console.log(`📱 [MOCK WHATSAPP TRANSMISSION ROUTED TO: ${venueName}]`);
-    console.log(`   📞 Targeted Destination: ${sellerPhone}`);
-    console.log(`----------------------------------------------------------------`);
-    console.log(`👉 ACCEPT: http://localhost:5175/api/bookings/accept/${bookingData._id}?sellerId=${sellerId}`);
-    console.log(`❌ REJECT: http://localhost:5175/api/bookings/reject/${bookingData._id}?sellerId=${sellerId}`);
-    console.log(`================================================================\n`);
-    return true;
-  } catch (err) {
-    return false;
-  }
-};
 
 // =========================================================================
-// MATCHMAKING PIPELINE (Simultaneous Broadcast with Unique Sandbox Safeguard)
+// MATCHMAKING PIPELINE 
 // =========================================================================
 const processMatchmakingPipeline = async (bookingId) => {
   try {
-    const booking = await Booking.findById(bookingId);
+    const booking = await Booking.findById(bookingId).populate('selectedProductId');
     if (!booking || ACTIVE_STATUSES.includes(booking.status)) return;
 
     const sellerQueue = booking.routingQueue || [];
@@ -114,29 +126,30 @@ const processMatchmakingPipeline = async (bookingId) => {
 
     if (availableSellers.length === 0) {
       await Booking.findByIdAndUpdate(bookingId, { status: "allocation_failed" });
-      console.log("❌ Allocation aborted: All candidate options in local queue opted out or went offline.");
+      console.log("❌ Allocation aborted: All candidate options went offline.");
       return;
     }
 
     const offerExpiresAt = new Date(Date.now() + OFFER_TIMEOUT_MS);
+    
     const updatedBooking = await Booking.findOneAndUpdate(
       { _id: bookingId, status: { $nin: ACTIVE_STATUSES } },
       { status: "pending_allocation", offerExpiresAt, notifiedSellerId: null },
       { new: true }
-    );
+    ).populate('selectedProductId');
 
     if (!updatedBooking) return;
 
-    // 🛠️ FIX: Filter unique active staging lines to prevent concurrent sandbox message dropping
     const verifiedPhoneTracker = new Set();
     const uniqueDeliveryQueue = [];
 
     for (const seller of availableSellers) {
-      const cleanPhone = seller.phone?.trim();
+      // 🛠 nudge tracker to evaluate businessPhone properties
+      const cleanPhone = seller.businessPhone?.trim();
       if (!cleanPhone) continue;
 
       if (verifiedPhoneTracker.has(cleanPhone)) {
-        console.log(`🚫 De-duplication Shield: Suppressing duplicate concurrent delivery track for "${seller.businessName}" targeting testing number: ${cleanPhone}`);
+        console.log(`🚫 De-duplication Shield: Suppressing duplicate concurrent delivery track for "${seller.name}"`);
         continue;
       }
       
@@ -146,7 +159,6 @@ const processMatchmakingPipeline = async (bookingId) => {
 
     console.log(`📡 Blasting simultaneous alerts to ${uniqueDeliveryQueue.length} unique verified vendors...`);
 
-    // Fire text requests only to isolated unique channels
     await Promise.all(
       uniqueDeliveryQueue.map((seller) => sendJobOfferToSeller(seller, updatedBooking))
     );
@@ -161,20 +173,20 @@ const processMatchmakingPipeline = async (bookingId) => {
 // =========================================================================
 exports.createInstantBooking = async (req, res) => {
   try {
-    const { decorType, note, locationAddress, lat, lng, guestCount, eventType } = req.body;
+    const { name, decorType, note, locationAddress, lat, lng, guestCount, eventType, selectedProductId, estimatedPrice } = req.body;
     const userId = req.user.id;
     const latitude = parseFloat(lat);
     const longitude = parseFloat(lng);
 
-    if (!decorType || !locationAddress) {
-      return res.status(400).json({ success: false, message: "decorType and locationAddress are required." });
+    if (!name || !locationAddress) {
+      return res.status(400).json({ success: false, message: "name and locationAddress are required." });
     }
 
     if (!isValidCoordinate(latitude, longitude)) {
-      return res.status(400).json({ success: false, message: "A valid GPS location configuration is required." });
+      return res.status(400).json({ success: false, message: "A valid GPS location is required." });
     }
 
-    console.log(`🔍 Ring 1 Search: Scanning within ${METRO_INNER_RADIUS / 1000}km local radius threshold...`);
+    console.log(` Scanned local radius threshold coordinates directly over Arrah limits.`);
     let nearbySellers = await Seller.find({
       approved: true, blocked: false, isOnline: true, isAllocated: false,
       location: {
@@ -186,7 +198,7 @@ exports.createInstantBooking = async (req, res) => {
     }).limit(ABSOLUTE_MAX_BROADCAST_LIMIT);
 
     if (!nearbySellers || nearbySellers.length === 0) {
-      console.log(`⚠️ Ring 1 Empty. Expanding search to Ring 2: City Limits (${METRO_MAX_CUTOFF / 1000}km)...`);
+      console.log(`⚠️ Expanding search to City Limits...`);
       nearbySellers = await Seller.find({
         approved: true, blocked: false, isOnline: true, isAllocated: false,
         location: {
@@ -199,11 +211,10 @@ exports.createInstantBooking = async (req, res) => {
     }
 
     if (!nearbySellers || nearbySellers.length === 0) {
-      console.log("❌ Production Hard Cutoff Hit: No available vendors matching this city's area boundary parameters.");
       return res.status(404).json({
         success: false,
         code: "NO_LOCAL_VENDORS",
-        message: "We're sorry! No active professional decorators are available within your city limits right now."
+        message: "No active professional decorators are available within your city limits right now."
       });
     }
 
@@ -223,8 +234,10 @@ exports.createInstantBooking = async (req, res) => {
     const booking = await Booking.create({
       userId,
       bookingType: "instant",
-      serviceDetails: { decorType, note, guestCount, eventType },
+      serviceDetails: { name, decorType, note, guestCount, eventType },
       pickupLocation: { address: locationAddress, coordinates: [longitude, latitude] },
+      selectedProductId: selectedProductId || null, 
+      estimatedPrice: estimatedPrice || 0,
       routingQueue,
       currentRoutingIndex: 0,
     });
@@ -242,42 +255,36 @@ exports.createInstantBooking = async (req, res) => {
 
   } catch (error) {
     console.error("Production Error creating instant booking:", error);
-    return res.status(500).json({ success: false, message: "Internal application engine booking allocation failure." });
+    return res.status(500).json({ success: false, message: "Internal application failure." });
   }
 };
+
 // =========================================================================
 // GET USER BOOKINGS HISTORY
 // =========================================================================
 exports.getUserBookings = async (req, res) => {
   try {
-    const userId = req.user.id; // Pulled from your userAuth middleware
-
+    const userId = req.user.id;
     const bookings = await Booking.find({ userId })
-      .populate("sellerId", "businessName phone rating profileImage")
+      .populate("sellerId", "name businessPhone rating passportPhoto")
       .sort({ createdAt: -1 });
 
-    return res.json({
-      success: true,
-      bookings
-    });
+    return res.json({ success: true, bookings });
   } catch (error) {
-    console.error("Fetch user bookings error:", error);
-    return res.status(500).json({ 
-      success: false, 
-      message: "Failed to retrieve booking history records." 
-    });
+    return res.status(500).json({ success: false, message: "Failed to retrieve booking history records." });
   }
 };
+
 // =========================================================================
 // CREATE SCHEDULED BOOKING
 // =========================================================================
 exports.createScheduledBooking = async (req, res) => {
   try {
-    const { decorType, eventDate, timeSlot, locationAddress, lat, lng, guestCount, eventType } = req.body;
+    const { name, decorType, eventDate, timeSlot, locationAddress, lat, lng, guestCount, eventType } = req.body;
     const latitude = parseFloat(lat);
     const longitude = parseFloat(lng);
- console.log("reached");
-    if (!decorType || !locationAddress || !eventDate || !timeSlot) {
+
+    if (!name || !locationAddress || !eventDate || !timeSlot) {
       return res.status(400).json({ success: false, message: "Required parameter keys are missing." });
     }
 
@@ -289,17 +296,15 @@ exports.createScheduledBooking = async (req, res) => {
       userId: req.user.id,
       bookingType: "scheduled",
       scheduledTime: new Date(`${eventDate} ${timeSlot}`),
-      serviceDetails: { decorType, guestCount, eventType },
+      serviceDetails: { name, decorType, guestCount, eventType },
       pickupLocation: { address: locationAddress, coordinates: [longitude, latitude] },
     });
 
     return res.status(201).json({ success: true, booking });
   } catch (error) {
-    console.error(error);
     return res.status(500).json({ success: false, message: "Scheduled booking entry generation failed." });
   }
 };
-
 // =========================================================================
 // GET BOOKING STATUS
 // =========================================================================
@@ -647,3 +652,31 @@ exports.cancelBooking = async (req, res) => {
 };
 
 exports.processMatchmakingPipeline = processMatchmakingPipeline;
+exports.getSellerAssignedBookings = async (req, res) => {
+  try {
+    // req.seller.id is safely cracked and parsed by your sellerAuth middleware token decoder
+    const sellerId = req.seller.id;
+
+    if (!isValidObjectId(sellerId)) {
+      return res.status(400).json({ success: false, message: "Invalid authenticated vendor token footprint structure." });
+    }
+
+    // Query for any bookings where this seller is assigned or has operated on
+    const bookings = await Booking.find({ sellerId })
+      .populate("userId", "name phone email")
+      .populate("selectedProductId", "name price image")
+      .sort({ createdAt: -1 });
+
+    return res.json({
+      success: true,
+      count: bookings.length,
+      bookings
+    });
+  } catch (error) {
+    console.error("Error executing seller assignment fetching history log channels:", error);
+    return res.status(500).json({ 
+      success: false, 
+      message: "Internal server error querying active allocation matrices profiles." 
+    });
+  }
+};
