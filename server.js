@@ -7,7 +7,7 @@ const path = require("path");
 const cookieParser = require("cookie-parser");
 const fs = require('fs');
 const crypto = require('crypto');
-
+ 
 // Route Imports
 const shopRoutes = require("./routes/shop");
 const productRoutes = require("./routes/products");
@@ -28,20 +28,21 @@ const blogRoutes = require('./routes/blog');
 const videoRoutes = require('./routes/video');
 const adminBookingRoutes = require('./routes/adminBookingRoutes');
 const voiceRoutes = require('./routes/voiceRoutes');
-
+const chatRoutes = require('./routes/chatRoutes'); // ◄ NEW
+ 
 // Controllers & Global Services
 const settingsController = require('./controllers/settingsController');
-const { initSocket } = require('./socket'); 
+const { initSocket } = require('./socket/socketSetup'); 
 const { startMatchmakingSweep } = require('./controllers/matchmakingSweep'); 
-
+ 
 const app = express();
-
+ 
 // Generate a random JWT secret for seller authentication if not provided
 if (!process.env.JWT_SECRET_SELLER) {
   process.env.JWT_SECRET_SELLER = crypto.randomBytes(64).toString('hex');
   console.log('Generated random JWT_SECRET_SELLER');
 }
-
+ 
 // CORS configuration - Allow specific origins for production
 const allowedOrigins = [
   'http://localhost:5173',
@@ -52,7 +53,7 @@ const allowedOrigins = [
   'https://ballon-admin-beta.vercel.app',
   'https://admin.decoryy.com'
 ];
-
+ 
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin) {
@@ -68,13 +69,13 @@ app.use(cors({
     }
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  methods: ['GET', 'POST', 'PUT', "DELETE", 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin', 'Access-Control-Allow-Origin', 'Content-Length'],
   exposedHeaders: ['Content-Length', 'X-Requested-With'],
   preflightContinue: false,
   optionsSuccessStatus: 204
 }));
-
+ 
 // Additional CORS headers for all routes
 app.use((req, res, next) => {
   const origin = req.headers.origin;
@@ -90,11 +91,11 @@ app.use((req, res, next) => {
     next();
   }
 });
-
+ 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cookieParser());
-
+ 
 // Error handling for payload too large
 app.use((err, req, res, next) => {
   if (err.type === 'entity.too.large') {
@@ -105,28 +106,28 @@ app.use((err, req, res, next) => {
   }
   next(err);
 });
-
+ 
 // Ensure data directories exist explicitly
 const dataDir = path.join(__dirname, 'data');
 const userProductDir = path.join(dataDir, 'userproduct');
 const productUploadsDir = path.join(dataDir, 'products'); 
-const sellerProfilesDir = path.join(dataDir, 'seller-profiles'); // ⚡ ADDED: Seller profile directory path parameter
-
+const sellerProfilesDir = path.join(dataDir, 'seller-profiles');
+ 
 [dataDir, userProductDir, productUploadsDir, sellerProfilesDir].forEach(dir => {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
     console.log('Created directory:', dir);
   }
 });
-
+ 
 // Static Media Delivery Pipeline Configuration
 app.use('/decoryy/data/products', express.static(productUploadsDir, { maxAge: '1h' }));
-app.use('/data/seller-profiles', express.static(sellerProfilesDir, { maxAge: '1h' })); // ⚡ ADDED: Native static file server mounting for vendor images
-
+app.use('/data/seller-profiles', express.static(sellerProfilesDir, { maxAge: '1h' }));
+ 
 app.use('/decoryy/data', (req, res, next) => {
   const filePath = path.join(__dirname, 'data', req.path);
   const ext = path.extname(filePath).toLowerCase();
-
+ 
   if (ext === '.mp4') {
     res.setHeader('Content-Type', 'video/mp4');
   } else if (ext === '.png') {
@@ -141,21 +142,21 @@ app.use('/decoryy/data', (req, res, next) => {
   fallthrough: true,
   maxAge: '1h'
 }));
-
+ 
 const MONGODB_URI = process.env.MONGODB_URI;
 if (!MONGODB_URI) {
   console.error('MONGODB_URI is not set. Refusing to start without a database connection string.');
   process.exit(1);
 }
-
+ 
 // =========================================================================
-// 🚀 ROUTING ARCHITECTURE (Specific matches prioritize early, catch-alls sit last)
+// ROUTING ARCHITECTURE (Specific matches prioritize early, catch-alls sit last)
 // =========================================================================
-
+ 
 // Product & Inventory Router Targets (High-priority routes)
 app.use("/api/shop", productRoutes); 
 app.use("/api/products", productRoutes);
-
+ 
 app.use("/api/orders", orderRoutes);
 app.use('/api/bestseller', bestSellerRoutes);
 app.use('/api/auth', authRoutes);
@@ -169,7 +170,7 @@ app.use('/api/hero-carousel', heroCarouselRoutes);
 app.use('/api/seller', sellerRoutes);
 app.use('/api/coupons', couponRoutes);
 app.use('/api/data-page', require('./routes/dataPage'));
-
+ 
 // Core Operational Modules
 app.use('/api/cities', require('./routes/city'));
 app.use('/api/payment', require('./routes/payment'));
@@ -184,13 +185,14 @@ app.use('/api/addons', require('./routes/addon'));
 app.use('/api/videos', require('./routes/video'));
 app.use("/api/bookings", bookingRoutes);
 app.use('/api/voice-gateway', voiceRoutes);
-
+app.use('/api/chat', chatRoutes); // ◄ NEW — must be before the subCategory catch-all below
+ 
 // Specific Sub-categories Route
 app.use('/api/categories', subCategoryRoutes);
-
+ 
 // Wildcard catch-all route placed safely at the very bottom
 app.use('/api', subCategoryRoutes); 
-
+ 
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({
@@ -201,7 +203,7 @@ app.get('/health', (req, res) => {
     environment: process.env.NODE_ENV || 'development'
   });
 });
-
+ 
 // Test endpoint for CORS
 app.get('/test-cors', (req, res) => {
   res.status(200).json({
@@ -210,7 +212,7 @@ app.get('/test-cors', (req, res) => {
     timestamp: new Date().toISOString()
   });
 });
-
+ 
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Error:', err.message);
@@ -219,18 +221,16 @@ app.use((err, req, res, next) => {
     error: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error'
   });
 });
-
+ 
 const PORT = process.env.PORT || 5175;
-
+ 
 // Initialize Server and extract Socket connection layer
 const httpServer = http.createServer(app);
-const io = initSocket(httpServer);
-
-// ⚡ Dynamic Binding: Make Socket IO instance queryable globally inside any Controller request
-app.set("socketio", io);
-
+const io = initSocket(httpServer); // ◄ your existing socket/index.js — see note below
+app.set('io', io);                 // ◄ NEW: expose io on app so chatController can emit
+ 
 mongoose.set('autoIndex', true);
-
+ 
 async function startServer() {
   try {
     console.log('Connecting to MongoDB...');
@@ -241,17 +241,17 @@ async function startServer() {
       socketTimeoutMS: 45000,
     });
     console.log("MongoDB connected successfully");
-
+ 
     try {
       await settingsController.initializeDefaultSettings();
       console.log('Default settings initialized successfully');
     } catch (error) {
       console.error('Failed to initialize default settings:', error);
     }
-
+ 
     startMatchmakingSweep();
     console.log('Matchmaking sweep job started');
-
+ 
     httpServer.listen(PORT, () => {
       console.log(`Server is running on port ${PORT}`);
       console.log('Server is ready to accept requests');
@@ -261,5 +261,6 @@ async function startServer() {
     process.exit(1); 
   }
 }
-
+ 
 startServer();
+ 

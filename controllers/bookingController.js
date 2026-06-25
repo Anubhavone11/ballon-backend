@@ -2,56 +2,111 @@ const mongoose = require("mongoose");
 const Booking = require("../models/Booking");
 const Seller = require("../models/Seller");
 const Product = require("../models/Product");
-
+const axios = require("axios"); // npm install axios  (if not already installed)
+ 
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
-
+ 
 // ─── WhatsApp client setup ────────────────────────────────────────────────────
-
+ 
+let isWAReady = false;
+ 
 const whatsappClient = new Client({
   authStrategy: new LocalAuth({ clientId: "decoryy_production_session" }),
   puppeteer: {
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--no-first-run',
+      '--no-zygote',
+      // NOTE: '--single-process' intentionally OMITTED — it crashes Chrome on Windows
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-features=TranslateUI',
+      '--disable-ipc-flooding-protection',
+    ],
   },
 });
-
+ 
 whatsappClient.on('qr', (qr) => {
   console.log('▼ Scan this QR code with WhatsApp to activate the Decoryy Engine ▼');
   qrcode.generate(qr, { small: true });
 });
-
+ 
 whatsappClient.on('ready', () => {
+  isWAReady = true;
   console.log('✅ Decoryy WhatsApp Engine is live and ready.');
 });
-
-whatsappClient.on('auth_failure', () => {
-  console.error('❌ WhatsApp authentication failed. Delete the session folder and restart.');
+ 
+whatsappClient.on('disconnected', (reason) => {
+  isWAReady = false;
+  console.warn('⚠️ WhatsApp disconnected:', reason, '— reinitializing in 5s...');
+  setTimeout(() => {
+    whatsappClient.initialize().catch((err) =>
+      console.error('❌ Reinitialization failed:', err.message)
+    );
+  }, 5000);
 });
-
-whatsappClient.initialize();
-
+ 
+whatsappClient.on('auth_failure', (msg) => {
+  isWAReady = false;
+  console.error('❌ WhatsApp auth failed:', msg, '— Delete .wwebjs_auth and restart.');
+});
+ 
+// Catch initialization errors so nodemon doesn't die
+whatsappClient.initialize().catch((err) => {
+  console.error('❌ WhatsApp initialize() threw:', err.message);
+  console.error('   → Delete the .wwebjs_auth folder and restart the server.');
+});
+ 
+// Prevent the process from crashing on an uncaught Puppeteer error
+process.on('uncaughtException', (err) => {
+  if (
+    err.message?.includes('detached Frame') ||
+    err.message?.includes('LifecycleWatcher') ||
+    err.message?.includes('Execution context was destroyed') ||
+    err.message?.includes('Target closed') ||
+    err.message?.includes('Session closed')
+  ) {
+    console.error('⚠️ Caught Puppeteer crash (will auto-recover):', err.message);
+    isWAReady = false;
+    // Give it a moment then reinitialize
+    setTimeout(() => {
+      whatsappClient.initialize().catch((e) =>
+        console.error('❌ Recovery reinit failed:', e.message)
+      );
+    }, 8000);
+  } else {
+    // Re-throw anything that isn't a Puppeteer frame error
+    console.error('💥 Unhandled exception:', err);
+    process.exit(1);
+  }
+});
+ 
 // ─── Configuration ────────────────────────────────────────────────────────────
-
-const OFFER_TIMEOUT_MS            = parseInt(process.env.MATCHMAKING_OFFER_TIMEOUT_MS, 10) || 60000;
-const METRO_INNER_RADIUS          = parseInt(process.env.METRO_INNER_RADIUS, 10)           || 15000;
-const METRO_MAX_CUTOFF            = parseInt(process.env.METRO_MAX_CUTOFF, 10)             || 40000;
+ 
+const OFFER_TIMEOUT_MS             = parseInt(process.env.MATCHMAKING_OFFER_TIMEOUT_MS, 10) || 60000;
+const METRO_INNER_RADIUS           = parseInt(process.env.METRO_INNER_RADIUS, 10)           || 15000;
+const METRO_MAX_CUTOFF             = parseInt(process.env.METRO_MAX_CUTOFF, 10)             || 40000;
 const ABSOLUTE_MAX_BROADCAST_LIMIT = parseInt(process.env.ABSOLUTE_MAX_BROADCAST_LIMIT, 10) || 12;
-const ANTI_BAN_DELAY_MS           = parseInt(process.env.ANTI_BAN_DELAY_MS, 10)           || 40000;
-
+const ANTI_BAN_DELAY_MS            = parseInt(process.env.ANTI_BAN_DELAY_MS, 10)            || 40000;
+ 
 const ACTIVE_STATUSES = ["seller_assigned", "cancelled", "completed"];
-
+ 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
+ 
 const isValidCoordinate = (lat, lng) =>
   typeof lat === "number" && typeof lng === "number" &&
   !Number.isNaN(lat) && !Number.isNaN(lng) &&
   lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
-
+ 
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
-
+ 
 const toRadians = (deg) => (deg * Math.PI) / 180;
-
+ 
 const haversineDistanceMeters = (lat1, lng1, lat2, lng2) => {
   const dLat = toRadians(lat2 - lat1);
   const dLng = toRadians(lng2 - lng1);
@@ -60,93 +115,145 @@ const haversineDistanceMeters = (lat1, lng1, lat2, lng2) => {
     Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(dLng / 2) ** 2;
   return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 };
-
+ 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
+ 
 // Normalise an Indian phone number to WhatsApp ID format (91XXXXXXXXXX@c.us)
 const toWhatsAppId = (rawPhone) => {
   const clean = rawPhone.trim().replace(/[\s\-()+]/g, "");
   const withCountryCode = clean.length === 10 ? `91${clean}` : clean;
   return `${withCountryCode}@c.us`;
 };
-
+ 
+// ─── Download image to base64 via axios (NO Puppeteer involvement) ────────────
+ 
+const downloadImageAsBase64 = async (url) => {
+  const response = await axios.get(url, {
+    responseType: 'arraybuffer',
+    timeout: 15000,
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; Decoryy/1.0)',
+    },
+  });
+ 
+  const mimeType = response.headers['content-type']?.split(';')[0]?.trim() || 'image/jpeg';
+  const base64   = Buffer.from(response.data, 'binary').toString('base64');
+  return { base64, mimeType };
+};
+ 
 // ─── WhatsApp job offer dispatcher ───────────────────────────────────────────
-
+ 
 const sendJobOfferToSeller = async (seller, booking) => {
   try {
+    if (!isWAReady) {
+      console.warn(`⚠️ WhatsApp not ready — skipping ${seller?.name}.`);
+      return false;
+    }
+ 
     if (!seller?.businessPhone) {
       console.warn(`⚠️ Skipping seller ${seller?._id}: no phone number.`);
       return false;
     }
-
-    const whatsappId = toWhatsAppId(seller.businessPhone);
-    const item = booking.selectedProductId; // populated Product document
-
-    const clientName     = booking.serviceDetails?.name     || "Customer";
-    const eventTheme     = booking.serviceDetails?.decorType || "Not specified";
-    const venueAddress   = booking.pickupLocation?.address  || "See dashboard";
-    const bookingId      = booking._id;
-
-    // Build product description line
+ 
+    const whatsappId   = toWhatsAppId(seller.businessPhone);
+    const item         = booking.selectedProductId; // populated Product document
+    const clientName   = booking.serviceDetails?.name  || "Customer";
+    const venueAddress = booking.pickupLocation?.address || "See dashboard";
+    const bookingId    = booking._id;
+ 
     const itemName         = item?.name  || "Custom decoration";
     const itemPrice        = item?.price != null ? `₹${item.price}` : "—";
     const deliveryTime     = item?.instantDeliveryTime || null;
     const deliveryTimeLine = deliveryTime ? `⏱️ *Delivery time:* ${deliveryTime}` : "";
-
-    // One-click accept / reject URLs
+ 
     const acceptUrl = `${process.env.APP_URL || 'http://localhost:5175'}/api/bookings/accept/${bookingId}?sellerId=${seller._id}`;
     const rejectUrl = `${process.env.APP_URL || 'http://localhost:5175'}/api/bookings/reject/${bookingId}?sellerId=${seller._id}`;
-
+ 
     const message =
       `✨ *NEW JOB OFFER — DECORYY* ✨\n\n` +
       `👤 *Client:* ${clientName}\n` +
-      `🎨 *Theme:* ${eventTheme}\n` +
       `📦 *Item:* ${itemName} (${itemPrice})\n` +
       (deliveryTimeLine ? `${deliveryTimeLine}\n` : '') +
       `📍 *Venue:* ${venueAddress}\n\n` +
       `✅ *Accept this job:*\n${acceptUrl}\n\n` +
       `❌ *Reject / pass:*\n${rejectUrl}\n\n` +
       `_You have 60 seconds to respond before this offer moves to the next decorator._`;
-
-    // Prefer sending the product image as the media attachment.
-    // Falls back to text-only if no image or if the download fails.
+ 
     const productImageUrl = item?.image || item?.images?.[0] || null;
-
+ 
+    const trySendWithImage = async () => {
+      const { base64, mimeType } = await downloadImageAsBase64(productImageUrl);
+      const media = new MessageMedia(mimeType, base64, `${itemName}.jpg`);
+      await whatsappClient.sendMessage(whatsappId, media, { caption: message });
+    };
+ 
+    const trySendTextOnly = async () => {
+      await whatsappClient.sendMessage(whatsappId, message);
+    };
+ 
+    const sendWithRetry = async (sendFn, label) => {
+      try {
+        await sendFn();
+        return true;
+      } catch (err) {
+        if (err.message?.includes('detached Frame')) {
+          console.warn(`⚠️ Detached frame on ${label} for ${seller.name}. Retrying in 3s...`);
+          await delay(3000);
+          await sendFn();
+          return true;
+        }
+        throw err;
+      }
+    };
+ 
     if (productImageUrl) {
       try {
-        const media = await MessageMedia.fromUrl(productImageUrl, { unsafeMime: true });
-        await whatsappClient.sendMessage(whatsappId, media, { caption: message });
-        console.log(`📸 Product image + offer sent to ${seller.name}`);
+        await sendWithRetry(trySendWithImage, 'image send');
+        console.log(`📸 Image + offer sent to ${seller.name}`);
         return true;
-      } catch (mediaErr) {
-        console.warn(`⚠️ Could not attach product image for ${seller.name}: ${mediaErr.message}. Sending text only.`);
+      } catch (imgErr) {
+        console.warn(
+          `⚠️ Image send failed for ${seller.name}: ${imgErr.message}. Falling back to text.`
+        );
+        try {
+          await sendWithRetry(trySendTextOnly, 'text fallback');
+          console.log(`📝 Text-only offer sent to ${seller.name} (image fallback)`);
+          return true;
+        } catch (textErr) {
+          console.error(`❌ Text fallback also failed for ${seller.name}:`, textErr.message);
+          return false;
+        }
       }
     }
-
-    // Text-only fallback
-    await whatsappClient.sendMessage(whatsappId, message);
-    console.log(`📝 Text offer sent to ${seller.name}`);
-    return true;
-
+ 
+    try {
+      await sendWithRetry(trySendTextOnly, 'text send');
+      console.log(`📝 Text offer sent to ${seller.name}`);
+      return true;
+    } catch (err) {
+      console.error(`❌ Text send failed for ${seller.name}:`, err.message);
+      return false;
+    }
+ 
   } catch (err) {
     console.error(`❌ Failed to send offer to seller ${seller?._id}:`, err.message);
     return false;
   }
 };
-
+ 
 // ─── Matchmaking pipeline ─────────────────────────────────────────────────────
-
+ 
 const processMatchmakingPipeline = async (bookingId) => {
   try {
     const booking = await Booking.findById(bookingId).populate('selectedProductId');
     if (!booking || ACTIVE_STATUSES.includes(booking.status)) return;
-
+ 
     const sellerQueue = booking.routingQueue || [];
     if (sellerQueue.length === 0) {
       await Booking.findByIdAndUpdate(bookingId, { status: "allocation_failed" });
       return;
     }
-
+ 
     const availableSellers = await Seller.find({
       _id: { $in: sellerQueue },
       isOnline: true,
@@ -154,14 +261,13 @@ const processMatchmakingPipeline = async (bookingId) => {
       blocked: false,
       approved: true,
     });
-
+ 
     if (availableSellers.length === 0) {
       await Booking.findByIdAndUpdate(bookingId, { status: "allocation_failed" });
       console.log(`❌ No available sellers for booking ${bookingId}.`);
       return;
     }
-
-    // Lock the booking into pending_allocation
+ 
     const updatedBooking = await Booking.findOneAndUpdate(
       { _id: bookingId, status: { $nin: ACTIVE_STATUSES } },
       {
@@ -171,15 +277,14 @@ const processMatchmakingPipeline = async (bookingId) => {
       },
       { new: true }
     ).populate('selectedProductId');
-
+ 
     if (!updatedBooking) return;
-
-    // Deduplicate sellers by phone number, preserve priority order
+ 
     const orderMap = sellerQueue.map(String);
     const sorted = availableSellers.sort(
       (a, b) => orderMap.indexOf(String(a._id)) - orderMap.indexOf(String(b._id))
     );
-
+ 
     const seenPhones = new Set();
     const dedupedQueue = sorted.filter((s) => {
       const phone = s.businessPhone?.trim();
@@ -187,55 +292,54 @@ const processMatchmakingPipeline = async (bookingId) => {
       seenPhones.add(phone);
       return true;
     });
-
+ 
     console.log(`📡 Sending offers to ${dedupedQueue.length} decorator(s) in ${updatedBooking.serviceDetails?.city || 'city'}...`);
-
+ 
     for (const seller of dedupedQueue) {
-      // Stop if someone already accepted
       const current = await Booking.findById(bookingId).select("status").lean();
       if (current && ACTIVE_STATUSES.includes(current.status)) {
         console.log(`🛑 Booking ${bookingId} already taken. Stopping queue.`);
         break;
       }
-
+ 
       await sendJobOfferToSeller(seller, updatedBooking);
       console.log(`⏳ Waiting ${ANTI_BAN_DELAY_MS / 1000}s before next message...`);
       await delay(ANTI_BAN_DELAY_MS);
     }
-
+ 
   } catch (err) {
     console.error("Matchmaking pipeline error:", err);
   }
 };
-
+ 
 // ─── Create instant booking ───────────────────────────────────────────────────
-
+ 
 exports.createInstantBooking = async (req, res) => {
   try {
     const {
-      name, decorType, note, locationAddress,
+      name, note, locationAddress,
       lat, lng, city, guestCount, eventType,
       selectedProductId, estimatedPrice,
     } = req.body;
-
-    const userId   = req.user.id;
+ 
+    const userId    = req.user.id;
     const latitude  = parseFloat(lat);
     const longitude = parseFloat(lng);
-
+ 
     if (!name || !locationAddress || !city) {
       return res.status(400).json({
         success: false,
         message: "Name, address, and city are all required.",
       });
     }
-
+ 
     if (!isValidCoordinate(latitude, longitude)) {
       return res.status(400).json({
         success: false,
         message: "Valid GPS coordinates are required.",
       });
     }
-
+ 
     // Radius level 1 — tighter search within the same city
     let nearbySellers = await Seller.find({
       city: { $regex: new RegExp(`^${city.trim()}$`, "i") },
@@ -250,7 +354,7 @@ exports.createInstantBooking = async (req, res) => {
         },
       },
     }).limit(ABSOLUTE_MAX_BROADCAST_LIMIT);
-
+ 
     // Radius level 2 — wider search but still same city
     if (!nearbySellers.length) {
       nearbySellers = await Seller.find({
@@ -267,7 +371,7 @@ exports.createInstantBooking = async (req, res) => {
         },
       }).limit(ABSOLUTE_MAX_BROADCAST_LIMIT);
     }
-
+ 
     if (!nearbySellers.length) {
       return res.status(404).json({
         success: false,
@@ -275,195 +379,191 @@ exports.createInstantBooking = async (req, res) => {
         message: `No decorators are available in ${city} right now. Please try again shortly.`,
       });
     }
-
-    // Multi-factor ranking: closer + higher-rated + premium sellers come first
+ 
     console.log(`\n🔍 Ranking ${nearbySellers.length} seller(s) in ${city.toUpperCase()}`);
-
+ 
     const rankedSellers = nearbySellers
       .map((seller) => {
         const [sellerLng, sellerLat] = seller.location.coordinates;
         const distanceM = haversineDistanceMeters(sellerLat, sellerLng, latitude, longitude);
         const rating    = seller.rating && seller.rating > 0 ? seller.rating : 1.0;
-        const premiumMultiplier = seller.isPremium ? 0.80 : 1.0; // premium sellers effectively "closer"
+        const premiumMultiplier = seller.isPremium ? 0.80 : 1.0;
         const score     = (distanceM * premiumMultiplier) / rating;
-
+ 
         console.log(
           `  • ${seller.name} | ${(distanceM / 1000).toFixed(2)} km | ` +
           `Rating: ${rating} | Premium: ${seller.isPremium ? 'Yes' : 'No'} | Score: ${score.toFixed(0)}`
         );
-
+ 
         return { id: seller._id, score };
       })
       .sort((a, b) => a.score - b.score);
-
+ 
     const routingQueue = rankedSellers.map((s) => s.id);
-
+ 
     const booking = await Booking.create({
       userId,
       bookingType: "instant",
-      serviceDetails: { name, decorType, note, guestCount, eventType, city },
+      serviceDetails: { name, note, guestCount, eventType, city },
       pickupLocation: { address: locationAddress, coordinates: [longitude, latitude] },
       selectedProductId: selectedProductId || null,
       estimatedPrice: estimatedPrice || 0,
       routingQueue,
       currentRoutingIndex: 0,
     });
-
-    // Run matchmaking in the background — don't block the HTTP response
+ 
     processMatchmakingPipeline(booking._id).catch((err) =>
       console.error("Background matchmaking error:", err)
     );
-
+ 
     return res.status(201).json({
       success: true,
       bookingId: booking._id,
       booking,
       message: "Booking created. Finding the best decorator nearby...",
     });
-
+ 
   } catch (err) {
     console.error("createInstantBooking error:", err);
     return res.status(500).json({ success: false, message: "Something went wrong. Please try again." });
   }
 };
-
+ 
 // ─── Get user booking history ─────────────────────────────────────────────────
-
+ 
 exports.getUserBookings = async (req, res) => {
   try {
     const bookings = await Booking.find({ userId: req.user.id })
       .populate("sellerId", "name businessPhone rating passportPhoto")
       .sort({ createdAt: -1 });
-
+ 
     return res.json({ success: true, bookings });
   } catch (err) {
     console.error("getUserBookings error:", err);
     return res.status(500).json({ success: false, message: "Could not fetch booking history." });
   }
 };
-
+ 
 // ─── Create scheduled booking ─────────────────────────────────────────────────
-
+ 
 exports.createScheduledBooking = async (req, res) => {
   try {
-    const { name, decorType, eventDate, timeSlot, locationAddress, lat, lng, guestCount, eventType } = req.body;
+    const { name, eventDate, timeSlot, locationAddress, lat, lng, guestCount, eventType } = req.body;
     const latitude  = parseFloat(lat);
     const longitude = parseFloat(lng);
-
+ 
     if (!name || !locationAddress || !eventDate || !timeSlot) {
       return res.status(400).json({ success: false, message: "Name, address, date, and time are required." });
     }
-
+ 
     if (!isValidCoordinate(latitude, longitude)) {
       return res.status(400).json({ success: false, message: "Valid GPS coordinates are required." });
     }
-
+ 
     const booking = await Booking.create({
       userId: req.user.id,
       bookingType: "scheduled",
       scheduledTime: new Date(`${eventDate} ${timeSlot}`),
-      serviceDetails: { name, decorType, guestCount, eventType },
+      serviceDetails: { name, guestCount, eventType },
       pickupLocation: { address: locationAddress, coordinates: [longitude, latitude] },
     });
-
+ 
     return res.status(201).json({ success: true, booking });
   } catch (err) {
     console.error("createScheduledBooking error:", err);
     return res.status(500).json({ success: false, message: "Could not create scheduled booking." });
   }
 };
-
+ 
 // ─── Get booking status ───────────────────────────────────────────────────────
-
+ 
 exports.getBookingStatus = async (req, res) => {
   try {
     const { bookingId } = req.params;
-
+ 
     if (!isValidObjectId(bookingId)) {
       return res.status(400).json({ success: false, message: "Invalid booking ID." });
     }
-
+ 
     const booking = await Booking.findById(bookingId)
       .populate("sellerId", "name businessName email city rating completedBookings isPremium passportPhoto profileImage")
       .lean();
-
+ 
     if (!booking) {
       return res.status(404).json({ success: false, message: "Booking not found." });
     }
-
+ 
     if (String(booking.userId) !== String(req.user.id)) {
       return res.status(403).json({ success: false, message: "You do not have access to this booking." });
     }
-
+ 
     return res.json({ success: true, booking });
   } catch (err) {
     console.error("getBookingStatus error:", err);
     return res.status(500).json({ success: false, message: "Could not fetch booking status." });
   }
 };
-
+ 
 // ─── Seller accept booking ────────────────────────────────────────────────────
-
+ 
 exports.acceptBooking = async (req, res) => {
   const session = await mongoose.startSession();
   try {
-    const { bookingId }    = req.params;
-    const querySellerId    = req.query.sellerId;
-    const sellerId         = (querySellerId && isValidObjectId(querySellerId)) ? querySellerId : req.seller?.id;
-
+    const { bookingId }  = req.params;
+    const querySellerId  = req.query.sellerId;
+    const sellerId       = (querySellerId && isValidObjectId(querySellerId)) ? querySellerId : req.seller?.id;
+ 
     if (!sellerId || !isValidObjectId(bookingId)) {
       return res.status(401).send(errorPage("Invalid seller or booking ID."));
     }
-
+ 
     let resultBooking = null;
-
+ 
     await session.withTransaction(async () => {
       const booking = await Booking.findOne({
         _id: bookingId,
         status: "pending_allocation",
         offerExpiresAt: { $gt: new Date() },
       }).session(session);
-
+ 
       if (!booking) {
         const err = new Error("This offer has already been taken or has expired.");
         err.code = "OFFER_UNAVAILABLE";
         throw err;
       }
-
+ 
       const seller = await Seller.findOneAndUpdate(
         { _id: sellerId, isAllocated: false },
         { isAllocated: true },
         { new: true, session }
       );
-
+ 
       if (!seller) {
         const err = new Error("You are currently assigned to another booking.");
         err.code = "SELLER_BUSY";
         throw err;
       }
-
+ 
       booking.sellerId         = sellerId;
       booking.status           = "seller_assigned";
       booking.acceptedAt       = new Date();
       booking.notifiedSellerId = null;
       booking.offerExpiresAt   = null;
-
+ 
       await booking.save({ session });
       resultBooking = booking;
     });
-
-    // JSON response (dashboard / API call)
+ 
     if (req.xhr || req.headers.accept?.includes('application/json') || !req.query.sellerId) {
       return res.json({ success: true, message: "Booking accepted!", booking: resultBooking });
     }
-
-    // HTML response (WhatsApp link click)
+ 
     return res.send(successPage(bookingId));
-
+ 
   } catch (err) {
     console.error("acceptBooking error:", err);
     const msg = err.code ? err.message : "Could not accept this booking. Please try again.";
-
+ 
     if (req.xhr || req.headers.accept?.includes('application/json')) {
       return res.status(409).json({ success: false, message: msg });
     }
@@ -472,171 +572,170 @@ exports.acceptBooking = async (req, res) => {
     await session.endSession();
   }
 };
-
+ 
 // ─── Seller reject booking ────────────────────────────────────────────────────
-
+ 
 exports.rejectBooking = async (req, res) => {
   try {
     const { bookingId } = req.params;
     const querySellerId = req.query.sellerId;
     const sellerId      = (querySellerId && isValidObjectId(querySellerId)) ? querySellerId : req.seller?.id;
-
+ 
     if (!sellerId || !isValidObjectId(bookingId)) {
       return res.status(401).send(errorPage("Invalid seller or booking ID."));
     }
-
+ 
     const booking = await Booking.findById(bookingId);
-
+ 
     if (booking && booking.status === "pending_allocation") {
       await Booking.findByIdAndUpdate(bookingId, { $pull: { routingQueue: sellerId } });
       console.log(`↩️ Seller ${sellerId} rejected booking ${bookingId}. Moving to next in queue.`);
-
-      // Re-run pipeline for remaining sellers in background
+ 
       processMatchmakingPipeline(bookingId).catch((err) =>
         console.error("Pipeline error after rejection:", err)
       );
     }
-
+ 
     return res.send(rejectPage());
   } catch (err) {
     console.error("rejectBooking error:", err);
     return res.status(500).send("<h1>Something went wrong. Please close this window.</h1>");
   }
 };
-
+ 
 // ─── Complete booking ─────────────────────────────────────────────────────────
-
+ 
 exports.completeBooking = async (req, res) => {
   try {
     const { bookingId } = req.params;
-
+ 
     if (!isValidObjectId(bookingId)) {
       return res.status(400).json({ success: false, message: "Invalid booking ID." });
     }
-
+ 
     const booking = await Booking.findOneAndUpdate(
       { _id: bookingId, status: "seller_assigned" },
       { status: "completed", completedAt: new Date() },
       { new: true }
     );
-
+ 
     if (!booking) {
       return res.status(404).json({ success: false, message: "Booking not found or cannot be completed." });
     }
-
+ 
     await Seller.findByIdAndUpdate(booking.sellerId, {
       isAllocated: false,
       $inc: { completedBookings: 1 },
     });
-
+ 
     return res.json({ success: true, booking });
   } catch (err) {
     console.error("completeBooking error:", err);
     return res.status(500).json({ success: false, message: "Could not complete this booking." });
   }
 };
-
+ 
 // ─── Seller cancel booking ────────────────────────────────────────────────────
-
+ 
 exports.sellerCancelBooking = async (req, res) => {
   try {
-    const { bookingId }        = req.params;
+    const { bookingId }          = req.params;
     const { cancellationReason } = req.body;
-    const sellerId             = req.seller.id;
-
+    const sellerId               = req.seller.id;
+ 
     const booking = await Booking.findOne({ _id: bookingId, sellerId });
     if (!booking) {
       return res.status(404).json({ success: false, message: "Booking not found for your account." });
     }
-
+ 
     if (booking.status === 'completed') {
       return res.status(400).json({ success: false, message: "Completed bookings cannot be cancelled." });
     }
-
-    booking.status             = 'cancelled';
+ 
+    booking.status              = 'cancelled';
     booking.cancellationDetails = {
       cancelledBy: 'seller',
       reason: cancellationReason || 'Cancelled by decorator.',
       timestamp: new Date(),
     };
     await booking.save();
-
+ 
     await Seller.findByIdAndUpdate(sellerId, { isAllocated: false });
-
+ 
     return res.json({ success: true, message: "Booking cancelled successfully." });
   } catch (err) {
     console.error("sellerCancelBooking error:", err);
     return res.status(500).json({ success: false, message: "Could not cancel this booking." });
   }
 };
-
+ 
 // ─── Customer cancel booking ──────────────────────────────────────────────────
-
+ 
 exports.cancelBooking = async (req, res) => {
   try {
-    const { bookingId }        = req.params;
+    const { bookingId }          = req.params;
     const { cancellationReason } = req.body;
-
+ 
     if (!isValidObjectId(bookingId)) {
       return res.status(400).json({ success: false, message: "Invalid booking ID." });
     }
-
+ 
     const booking = await Booking.findById(bookingId);
     if (!booking) {
       return res.status(404).json({ success: false, message: "Booking not found." });
     }
-
+ 
     if (["completed", "cancelled"].includes(booking.status)) {
       return res.status(409).json({ success: false, message: `This booking is already ${booking.status}.` });
     }
-
+ 
     const hadSeller = booking.status === "seller_assigned" && booking.sellerId;
-
-    booking.status           = "cancelled";
-    booking.cancelledAt      = new Date();
+ 
+    booking.status             = "cancelled";
+    booking.cancelledAt        = new Date();
     booking.cancellationReason = cancellationReason || "";
-    booking.notifiedSellerId = null;
-    booking.offerExpiresAt   = null;
+    booking.notifiedSellerId   = null;
+    booking.offerExpiresAt     = null;
     await booking.save();
-
+ 
     if (hadSeller) {
       await Seller.findByIdAndUpdate(booking.sellerId, { isAllocated: false });
     }
-
+ 
     return res.json({ success: true, booking });
   } catch (err) {
     console.error("cancelBooking error:", err);
     return res.status(500).json({ success: false, message: "Could not cancel this booking." });
   }
 };
-
+ 
 // ─── Get seller's assigned bookings ──────────────────────────────────────────
-
+ 
 exports.getSellerAssignedBookings = async (req, res) => {
   try {
     const sellerId = req.seller.id;
-
+ 
     if (!isValidObjectId(sellerId)) {
       return res.status(400).json({ success: false, message: "Invalid seller account." });
     }
-
+ 
     const bookings = await Booking.find({ sellerId })
       .populate("userId", "name phone email")
       .populate("selectedProductId", "name price image instantDeliveryTime")
       .sort({ createdAt: -1 });
-
+ 
     return res.json({ success: true, count: bookings.length, bookings });
   } catch (err) {
     console.error("getSellerAssignedBookings error:", err);
     return res.status(500).json({ success: false, message: "Could not fetch your bookings." });
   }
 };
-
+ 
 // Export for use in scheduled task runners if needed
 exports.processMatchmakingPipeline = processMatchmakingPipeline;
-
+ 
 // ─── HTML page helpers ────────────────────────────────────────────────────────
-
+ 
 const baseHtml = (content) => `
 <!DOCTYPE html>
 <html lang="en">
@@ -649,7 +748,7 @@ const baseHtml = (content) => `
   ${content}
 </body>
 </html>`;
-
+ 
 const successPage = (bookingId) => baseHtml(`
   <div class="max-w-md w-full bg-[#1e1e24] rounded-2xl p-8 border border-emerald-500/20 shadow-2xl text-center space-y-6">
     <div class="w-16 h-16 bg-emerald-500/10 text-emerald-400 rounded-full flex items-center justify-center mx-auto text-3xl animate-bounce">🎉</div>
@@ -664,7 +763,7 @@ const successPage = (bookingId) => baseHtml(`
     <p class="text-xs text-gray-500">You can close this window now.</p>
     <button onclick="window.close()" class="w-full bg-emerald-500 hover:bg-emerald-600 text-[#121214] font-semibold py-3 px-4 rounded-xl transition text-sm">Close</button>
   </div>`);
-
+ 
 const warningPage = (message) => baseHtml(`
   <div class="max-w-md w-full bg-[#1e1e24] rounded-2xl p-8 border border-amber-500/20 shadow-2xl text-center space-y-6">
     <div class="w-16 h-16 bg-amber-500/10 text-amber-400 rounded-full flex items-center justify-center mx-auto text-3xl">⏳</div>
@@ -674,14 +773,14 @@ const warningPage = (message) => baseHtml(`
     </div>
     <button onclick="window.close()" class="w-full bg-gray-800 hover:bg-gray-700 text-gray-300 font-semibold py-3 px-4 rounded-xl transition text-sm">Close</button>
   </div>`);
-
+ 
 const errorPage = (message) => baseHtml(`
   <div class="max-w-md w-full bg-[#1e1e24] rounded-2xl p-8 border border-red-500/20 shadow-2xl text-center space-y-4">
     <div class="text-3xl text-red-400">❌</div>
     <h1 class="text-xl font-bold text-red-400">Something went wrong</h1>
     <p class="text-gray-400 text-sm">${message}</p>
   </div>`);
-
+ 
 const rejectPage = () => baseHtml(`
   <div class="max-w-md w-full bg-[#1e1e24] rounded-2xl p-8 border border-gray-700 shadow-2xl text-center space-y-6">
     <div class="w-16 h-16 bg-gray-500/10 text-gray-400 rounded-full flex items-center justify-center mx-auto text-3xl">↩️</div>

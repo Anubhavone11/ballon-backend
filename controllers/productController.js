@@ -13,85 +13,98 @@ const getAllProducts = async (req, res) => {
     const { category, subCategory, limit, search, city, page, adminView, instant } = req.query;
     console.log("getAllProducts endpoint reached with params:", req.query);
 
-    // Base query: filter for public store views, clear for admin view
-    let query = (adminView === 'true' || adminView === true) ? {} : {
+    // Base query
+    let query = (adminView === 'true') ? {} : {
       inStock: true,
       stock: { $gt: 0 }
     };
 
-    // Handle Instant query parameter dynamically
-    if (instant === 'true' || instant === true) {
+    if (instant === 'true') {
       query.isInstantAvailable = true;
     }
 
-    // If city provided, resolve it and filter
+    // City filtering
     let resolvedCityId = null;
     if (city && city !== 'null' && city !== 'undefined') {
       if (mongoose.Types.ObjectId.isValid(city)) {
-        resolvedCityId = city;
+        resolvedCityId = new mongoose.Types.ObjectId(city);
       } else {
         const City = require('../models/City');
-        const cityDoc = await City.findOne({ name: new RegExp(`^${city}$`, 'i') });
-        if (cityDoc) {
-          resolvedCityId = cityDoc._id;
-        }
+        const cityDoc = await City.findOne({ name: new RegExp(`^${city.trim()}$`, 'i') });
+        if (cityDoc) resolvedCityId = cityDoc._id;
       }
-
-      if (resolvedCityId) {
-        query.cities = resolvedCityId;
-      }
+      if (resolvedCityId) query.cities = resolvedCityId;
     }
 
-    // Handle search
+    // Search
     if (search && search.trim()) {
       query.name = new RegExp(search.trim(), 'i');
     }
 
-    // ⚡ SAFE HYBRID CATEGORY SHIELD (Handles ObjectIds, String Names, and Mixed Document Data)
+    // ✅ FIXED: Resolve category to ObjectId BEFORE query — never pass raw string to Mongoose
     if (category && category !== 'undefined' && category !== 'null' && category.trim() !== '') {
-      const Category = require('../models/Category');
-      
+      const CategoryModel = require('../models/Category');
+
       if (mongoose.Types.ObjectId.isValid(category)) {
-        query.category = category;
+        query.category = new mongoose.Types.ObjectId(category);
       } else {
-        const cat = await Category.findOne({ name: new RegExp(`^${category.trim()}$`, 'i') });
+        const cat = await CategoryModel.findOne({
+          name: new RegExp(`^${category.trim()}$`, 'i')
+        }).select('_id').lean();
+
         if (cat) {
-          // If a category document is found, we query for products containing its ObjectId
-          // OR products containing the exact string fallback name
-          query.$or = [
-            { category: cat._id },
-            { category: category.trim() }
-          ];
+          query.category = cat._id; // Always an ObjectId now
         } else {
-          // Fallback if no matching Category document exists in database
-          query.category = category.trim();
+          // No matching category — return empty safely, no DB query needed
+          return res.status(200).json({
+            success: true,
+            products: [],
+            total: 0,
+            pagination: {
+              total: 0,
+              page: parseInt(page) || 1,
+              limit: parseInt(limit) || 50,
+              totalPages: 0
+            }
+          });
         }
       }
     }
 
-    // Handle subCategory (Handles both String Names and ObjectIds)
+    // ✅ FIXED: Same pattern for subCategory
     if (subCategory && subCategory !== 'undefined' && subCategory !== 'null' && subCategory.trim() !== '') {
-      const SubCategory = require('../models/SubCategory');
-      
+      const SubCategoryModel = require('../models/SubCategory');
+
       if (mongoose.Types.ObjectId.isValid(subCategory)) {
-        query.subCategory = subCategory;
+        query.subCategory = new mongoose.Types.ObjectId(subCategory);
       } else {
-        const subCat = await SubCategory.findOne({ name: new RegExp(`^${subCategory.trim()}$`, 'i') });
+        const subCat = await SubCategoryModel.findOne({
+          name: new RegExp(`^${subCategory.trim()}$`, 'i')
+        }).select('_id').lean();
+
         if (subCat) {
-          query.$or = query.$or || [];
-          query.$or.push({ subCategory: subCat._id }, { subCategory: subCategory.trim() });
+          query.subCategory = subCat._id;
         } else {
-          query.subCategory = subCategory.trim();
+          return res.status(200).json({
+            success: true,
+            products: [],
+            total: 0,
+            pagination: {
+              total: 0,
+              page: parseInt(page) || 1,
+              limit: parseInt(limit) || 50,
+              totalPages: 0
+            }
+          });
         }
       }
     }
 
-    // ⚡ FIX: We separate find() from populate() execution streams to handle mixed values safely
-    let productsQuery = Product.find(query).sort({ date: -1 });
-
+    // ✅ countDocuments is now safe — query only contains ObjectIds
     const totalCount = await Product.countDocuments(query);
 
-    // Apply pagination
+    let productsQuery = Product.find(query).sort({ date: -1 });
+
     if (page || limit) {
       const currentPage = parseInt(page) || 1;
       const productLimit = parseInt(limit) || 50;
@@ -99,30 +112,26 @@ const getAllProducts = async (req, res) => {
       productsQuery = productsQuery.skip(skip).limit(productLimit);
     }
 
-    // Fetch products as plain JavaScript objects
     let products = await productsQuery.lean();
 
-    // ⚡ FIX: Manually resolve populate tasks on text string entries to eliminate 500 CastErrors
+    // Safe populate on lean results
     const CategoryModel = require('../models/Category');
     const SubCategoryModel = require('../models/SubCategory');
 
     products = await Promise.all(products.map(async (product) => {
-      // 1. Safe Category Resolution
       if (product.category) {
         if (mongoose.Types.ObjectId.isValid(product.category)) {
           const populatedCat = await CategoryModel.findById(product.category).select('name').lean();
-          product.category = populatedCat || { _id: product.category, name: "Unknown Category" };
+          product.category = populatedCat || { _id: product.category, name: 'Unknown Category' };
         } else if (typeof product.category === 'string') {
-          // Map legacy text field values seamlessly to match storefront object templates
           product.category = { name: product.category };
         }
       }
 
-      // 2. Safe Subcategory Resolution
       if (product.subCategory) {
         if (mongoose.Types.ObjectId.isValid(product.subCategory)) {
           const populatedSubCat = await SubCategoryModel.findById(product.subCategory).select('name').lean();
-          product.subCategory = populatedSubCat || { _id: product.subCategory, name: "Unknown Subcategory" };
+          product.subCategory = populatedSubCat || { _id: product.subCategory, name: 'Unknown Subcategory' };
         } else if (typeof product.subCategory === 'string') {
           product.subCategory = { name: product.subCategory };
         }
@@ -131,17 +140,15 @@ const getAllProducts = async (req, res) => {
       return product;
     }));
 
-    // Adjust prices for city if selected
+    // City price override
     if (resolvedCityId) {
       products = products.map(product => {
         if (product.cityPrices && Array.isArray(product.cityPrices)) {
-          const cityPrice = product.cityPrices.find(cp => cp.city && cp.city.toString() === resolvedCityId.toString());
+          const cityPrice = product.cityPrices.find(
+            cp => cp.city && cp.city.toString() === resolvedCityId.toString()
+          );
           if (cityPrice) {
-            return {
-              ...product,
-              price: cityPrice.price,
-              regularPrice: cityPrice.regularPrice
-            };
+            return { ...product, price: cityPrice.price, regularPrice: cityPrice.regularPrice };
           }
         }
         return product;
@@ -162,7 +169,7 @@ const getAllProducts = async (req, res) => {
 
   } catch (error) {
     console.error('Error fetching products:', error);
-    return res.status(500).json({ success: false, message: "Error fetching products", error: error.message });
+    return res.status(500).json({ success: false, message: 'Error fetching products', error: error.message });
   }
 };
 /**
