@@ -1,5 +1,5 @@
 const mongoose = require("mongoose");
-const Booking = require("../models/Booking");
+const Booking = require("../models/booking");
 const Seller = require("../models/Seller");
 const Product = require("../models/Product");
 const axios = require("axios"); // npm install axios  (if not already installed)
