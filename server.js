@@ -33,7 +33,7 @@ const chatRoutes = require('./routes/chatRoutes'); // ◄ NEW
 // Controllers & Global Services
 const settingsController = require('./controllers/settingsController');
 const { initSocket } = require('./socket/socketSetup'); 
-const { startMatchmakingSweep } = require('./controllers/matchmakingSweep'); 
+
  
 const app = express();
  
@@ -42,7 +42,7 @@ if (!process.env.JWT_SECRET_SELLER) {
   process.env.JWT_SECRET_SELLER = crypto.randomBytes(64).toString('hex');
   console.log('Generated random JWT_SECRET_SELLER');
 }
- 
+
 // CORS configuration - Allow specific origins for production
 const allowedOrigins = [
   'http://localhost:5173',
