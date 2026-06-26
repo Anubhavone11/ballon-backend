@@ -32,7 +32,7 @@ const productSchema = new mongoose.Schema({
   instantDeliveryTime: {
     type: String, 
     trim: true,
-    default: "2 hr" // Default delivery setup window fallback (e.g., "1 hr", "2 hr")
+    default: "standard" // Default delivery setup window fallback (e.g., "1 hr", "2 hr")
   },
 
   utility: { type: String, required: true, trim: true },

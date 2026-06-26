@@ -6,7 +6,6 @@ const cors = require("cors");
 const path = require("path");
 const cookieParser = require("cookie-parser");
 const fs = require('fs');
-const crypto = require('crypto');
  
 // Route Imports
 const shopRoutes = require("./routes/shop");
@@ -28,22 +27,27 @@ const blogRoutes = require('./routes/blog');
 const videoRoutes = require('./routes/video');
 const adminBookingRoutes = require('./routes/adminBookingRoutes');
 const voiceRoutes = require('./routes/voiceRoutes');
-const chatRoutes = require('./routes/chatRoutes'); // ◄ NEW
+const chatRoutes = require('./routes/chatRoutes');
  
 // Controllers & Global Services
 const settingsController = require('./controllers/settingsController');
 const { initSocket } = require('./socket/socketSetup'); 
-const { startMatchmakingSweep } = require('./controllers/Matchmakingsweep'); 
+const { startMatchmakingSweep } = require('./controllers/Matchmakingsweep');
+const { initWhatsApp } = require('./controllers/bookingController'); // ◄ WhatsApp init
  
 const app = express();
  
-// Generate a random JWT secret for seller authentication if not provided
+// ─── JWT Secret — MUST be set in .env, never randomly generated ──────────────
+// ⚠️  A random secret means every server restart logs out all sellers.
+// Set JWT_SECRET_SELLER=<long random string> in your .env file and never change it.
 if (!process.env.JWT_SECRET_SELLER) {
-  process.env.JWT_SECRET_SELLER = crypto.randomBytes(64).toString('hex');
-  console.log('Generated random JWT_SECRET_SELLER');
+  console.error('❌ FATAL: JWT_SECRET_SELLER is not set in .env');
+  console.error('   Generate one with: node -e "console.log(require(\'crypto\').randomBytes(64).toString(\'hex\'))"');
+  console.error('   Then add it to your .env file permanently.');
+  process.exit(1); // Refuse to start — avoids silent session issues in production
 }
  
-// CORS configuration - Allow specific origins for production
+// ─── CORS configuration ───────────────────────────────────────────────────────
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:5174',
@@ -57,14 +61,12 @@ const allowedOrigins = [
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin) {
-      console.log('No origin header, allowing request');
       return callback(null, true);
     }
     if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
       console.log('CORS blocked origin:', origin);
-      console.log('Allowed origins:', allowedOrigins);
       callback(new Error('Not allowed by CORS'));
     }
   },
@@ -107,7 +109,7 @@ app.use((err, req, res, next) => {
   next(err);
 });
  
-// Ensure data directories exist explicitly
+// Ensure data directories exist
 const dataDir = path.join(__dirname, 'data');
 const userProductDir = path.join(dataDir, 'userproduct');
 const productUploadsDir = path.join(dataDir, 'products'); 
@@ -120,7 +122,7 @@ const sellerProfilesDir = path.join(dataDir, 'seller-profiles');
   }
 });
  
-// Static Media Delivery Pipeline Configuration
+// Static Media Delivery
 app.use('/decoryy/data/products', express.static(productUploadsDir, { maxAge: '1h' }));
 app.use('/data/seller-profiles', express.static(sellerProfilesDir, { maxAge: '1h' }));
  
@@ -150,13 +152,11 @@ if (!MONGODB_URI) {
 }
  
 // =========================================================================
-// ROUTING ARCHITECTURE (Specific matches prioritize early, catch-alls sit last)
+// ROUTING ARCHITECTURE
 // =========================================================================
  
-// Product & Inventory Router Targets (High-priority routes)
 app.use("/api/shop", productRoutes); 
 app.use("/api/products", productRoutes);
- 
 app.use("/api/orders", orderRoutes);
 app.use('/api/bestseller', bestSellerRoutes);
 app.use('/api/auth', authRoutes);
@@ -170,8 +170,6 @@ app.use('/api/hero-carousel', heroCarouselRoutes);
 app.use('/api/seller', sellerRoutes);
 app.use('/api/coupons', couponRoutes);
 app.use('/api/data-page', require('./routes/dataPage'));
- 
-// Core Operational Modules
 app.use('/api/cities', require('./routes/city'));
 app.use('/api/payment', require('./routes/payment'));
 app.use('/api/withdrawal', require('./routes/withdrawal'));
@@ -185,15 +183,11 @@ app.use('/api/addons', require('./routes/addon'));
 app.use('/api/videos', require('./routes/video'));
 app.use("/api/bookings", bookingRoutes);
 app.use('/api/voice-gateway', voiceRoutes);
-app.use('/api/chat', chatRoutes); // ◄ NEW — must be before the subCategory catch-all below
- 
-// Specific Sub-categories Route
+app.use('/api/chat', chatRoutes);
 app.use('/api/categories', subCategoryRoutes);
- 
-// Wildcard catch-all route placed safely at the very bottom
 app.use('/api', subCategoryRoutes); 
  
-// Health check endpoint
+// Health check
 app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'OK',
@@ -204,7 +198,7 @@ app.get('/health', (req, res) => {
   });
 });
  
-// Test endpoint for CORS
+// CORS test
 app.get('/test-cors', (req, res) => {
   res.status(200).json({
     message: 'CORS is working correctly',
@@ -213,7 +207,7 @@ app.get('/test-cors', (req, res) => {
   });
 });
  
-// Error handling middleware
+// Global error handler
 app.use((err, req, res, next) => {
   console.error('Error:', err.message);
   res.status(500).json({
@@ -224,10 +218,9 @@ app.use((err, req, res, next) => {
  
 const PORT = process.env.PORT || 5175;
  
-// Initialize Server and extract Socket connection layer
 const httpServer = http.createServer(app);
-const io = initSocket(httpServer); // ◄ your existing socket/index.js — see note below
-app.set('io', io);                 // ◄ NEW: expose io on app so chatController can emit
+const io = initSocket(httpServer);
+app.set('io', io);
  
 mongoose.set('autoIndex', true);
  
@@ -240,7 +233,11 @@ async function startServer() {
       serverSelectionTimeoutMS: 15000, 
       socketTimeoutMS: 45000,
     });
-    console.log("MongoDB connected successfully");
+    console.log("✅ MongoDB connected successfully");
+ 
+    // ◄ Initialize WhatsApp AFTER MongoDB is ready — RemoteAuth needs the DB
+    initWhatsApp();
+    console.log('📱 WhatsApp client initializing...');
  
     try {
       await settingsController.initializeDefaultSettings();
@@ -253,7 +250,7 @@ async function startServer() {
     console.log('Matchmaking sweep job started');
  
     httpServer.listen(PORT, () => {
-      console.log(`Server is running on port ${PORT}`);
+      console.log(`✅ Server is running on port ${PORT}`);
       console.log('Server is ready to accept requests');
     });
   } catch (error) {
