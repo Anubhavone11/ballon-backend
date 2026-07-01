@@ -1,8 +1,8 @@
 const express = require("express");
 const router = express.Router();
 const multer = require("multer");
-const path = require('path');
-const fs = require('fs');
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const cloudinary = require('../config/cloudinary');
 const {
   getAllProducts,
   getProduct,
@@ -12,25 +12,20 @@ const {
   getProductsBySection,
   updateProductSections
 } = require('../controllers/productController');
-
-// Ensure upload directory exists
-const uploadDir = path.join(__dirname, '../data/products');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-// Configure storage
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadDir);
+ 
+// Configure Cloudinary storage (replaces local diskStorage)
+const storage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: 'decoryy/products',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp'],
+    public_id: (req, file) => {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      return 'product-' + uniqueSuffix;
+    }
   },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const ext = path.extname(file.originalname);
-    cb(null, 'product-' + uniqueSuffix + ext);
-  }
 });
-
+ 
 const upload = multer({
   storage: storage,
   limits: {
@@ -44,7 +39,7 @@ const upload = multer({
     }
   }
 });
-
+ 
 // Upload multiple images (main image + 9 additional images)
 const uploadImages = upload.fields([
   { name: 'mainImage', maxCount: 1 },
@@ -58,7 +53,7 @@ const uploadImages = upload.fields([
   { name: 'image8', maxCount: 1 },
   { name: 'image9', maxCount: 1 }
 ]);
-
+ 
 // Middleware to handle multer upload
 const handleUpload = (req, res, next) => {
   uploadImages(req, res, function (err) {
@@ -70,42 +65,34 @@ const handleUpload = (req, res, next) => {
     next();
   });
 };
-
-// Middleware to transform local paths to URLs
+ 
+// multer-storage-cloudinary already sets file.path to the full Cloudinary CDN URL,
+// so no manual path-to-URL transform is needed anymore. Kept as a no-op pass-through
+// in case other code still references this middleware name.
 const transformPathsToUrls = (req, res, next) => {
-  if (req.files) {
-    const baseUrl = process.env.BACKEND_URL || 'https://api.decoryy.com';
-
-    Object.keys(req.files).forEach(key => {
-      req.files[key].forEach(file => {
-        // Convert absolute path to URL
-        const filename = file.filename;
-        file.path = `${baseUrl}/decoryy/data/products/${filename}`;
-      });
-    });
-  }
   next();
 };
-
+ 
 // Get all products
 router.get("/", getAllProducts);
-
+ 
 // Get products by section
 router.get("/section/:section", getProductsBySection);
-
+ 
 // Get single product
 router.get("/:id", getProduct);
-
+ 
 // Upload images and create product
 router.post("/upload", handleUpload, transformPathsToUrls, createProductWithFiles);
-
+ 
 // Update product by id
 router.put("/:id", handleUpload, transformPathsToUrls, updateProductWithFiles);
-
+ 
 // Update product sections
 router.patch("/:id/sections", updateProductSections);
-
+ 
 // Delete product by id
 router.delete("/:id", deleteProduct);
-
-module.exports = router; 
+ 
+module.exports = router;
+ 

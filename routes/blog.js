@@ -3,7 +3,17 @@ const router = express.Router();
 const Blog = require('../models/Blog');
 const { auth } = require('../middleware/auth');
 const { handleBlogImageUpload } = require('../middleware/blogUpload');
-
+ 
+// Helper: build a URL-safe slug from a title (mirrors the frontend's logic)
+const slugify = (value = '') =>
+  value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9 -]/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+ 
 // GET /api/blog - Get all blogs with pagination and filtering
 router.get('/', async (req, res) => {
   try {
@@ -12,7 +22,7 @@ router.get('/', async (req, res) => {
     const category = req.query.category;
     const search = req.query.search;
     const featured = req.query.featured === 'true';
-
+ 
     // Build query - only published blogs for public API
     const query = { isPublished: true };
     
@@ -24,9 +34,9 @@ router.get('/', async (req, res) => {
     if (featured) {
       query.featured = true;
     }
-
+ 
     const skip = (page - 1) * limit;
-
+ 
     // Use lean() for better performance and only select needed fields
     const blogs = await Blog.find(query)
       .sort({ createdAt: -1 })
@@ -34,11 +44,11 @@ router.get('/', async (req, res) => {
       .limit(limit)
       .select('title slug featuredImage author category readTime views createdAt')
       .lean();
-
+ 
     // Use countDocuments with the same query for consistency
     const total = await Blog.countDocuments(query);
     const totalPages = Math.ceil(total / limit);
-
+ 
     res.json({
       success: true,
       blogs,
@@ -55,7 +65,7 @@ router.get('/', async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
-
+ 
 // GET /api/blog/categories - Get all blog categories
 router.get('/categories', async (req, res) => {
   try {
@@ -78,24 +88,24 @@ router.get('/categories', async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
-
+ 
 // GET /api/blog/:slug - Get single blog by slug
 router.get('/:slug', async (req, res) => {
   try {
     const blog = await Blog.findOne({ 
       slug: req.params.slug
     });
-
+ 
     if (!blog) {
       return res.status(404).json({ 
         success: false, 
         message: 'Blog post not found' 
       });
     }
-
+ 
     // Increment views
     await blog.incrementViews();
-
+ 
     res.json({
       success: true,
       blog
@@ -105,9 +115,9 @@ router.get('/:slug', async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
-
+ 
 // ADMIN ROUTES (Protected)
-
+ 
 // GET /api/blog/admin/all - Get all blogs for admin (including unpublished)
 router.get('/admin/all', auth, async (req, res) => {
   try {
@@ -117,7 +127,7 @@ router.get('/admin/all', auth, async (req, res) => {
     const status = req.query.status;
     const category = req.query.category;
     const skip = (page - 1) * limit;
-
+ 
     // Build query for admin
     const query = {};
     
@@ -132,7 +142,7 @@ router.get('/admin/all', auth, async (req, res) => {
     if (category) {
       query.category = category;
     }
-
+ 
     // Use lean() for better performance and select only needed fields
     const blogs = await Blog.find(query)
       .sort({ createdAt: -1 })
@@ -140,10 +150,10 @@ router.get('/admin/all', auth, async (req, res) => {
       .limit(limit)
       .select('title slug featuredImage author category readTime views isPublished publishedAt createdAt')
       .lean();
-
+ 
     const total = await Blog.countDocuments(query);
     const totalPages = Math.ceil(total / limit);
-
+ 
     res.json({
       success: true,
       blogs,
@@ -160,7 +170,7 @@ router.get('/admin/all', auth, async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
-
+ 
 // GET /api/blog/admin/:id - Get single blog for admin
 router.get('/admin/:id', auth, async (req, res) => {
   try {
@@ -172,7 +182,7 @@ router.get('/admin/:id', auth, async (req, res) => {
         message: 'Blog post not found' 
       });
     }
-
+ 
     res.json({
       success: true,
       blog
@@ -182,17 +192,36 @@ router.get('/admin/:id', auth, async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
-
+ 
 // POST /api/blog - Create new blog (Admin only)
 router.post('/', auth, handleBlogImageUpload, async (req, res) => {
   try {
     const blogData = req.body;
-    
+ 
     // Handle uploaded image
     if (req.file) {
       blogData.featuredImage = req.file.path; // Cloudinary URL
     }
-    
+ 
+    // Required-field check with clear messages instead of a raw Mongoose error dump
+    const missing = [];
+    if (!blogData.title) missing.push('title');
+    if (!blogData.content) missing.push('content');
+    if (!blogData.author) missing.push('author');
+    if (!blogData.category) missing.push('category');
+    if (!blogData.featuredImage) missing.push('featuredImage');
+    if (missing.length) {
+      return res.status(400).json({
+        success: false,
+        message: `Missing required field(s): ${missing.join(', ')}`
+      });
+    }
+ 
+    // Safety net: always have a slug, even if the client didn't send one
+    if (!blogData.slug || !blogData.slug.trim()) {
+      blogData.slug = slugify(blogData.title);
+    }
+ 
     // Set publishedAt if isPublished is true
     if (blogData.isPublished && !blogData.publishedAt) {
       blogData.publishedAt = new Date();
@@ -200,10 +229,10 @@ router.post('/', auth, handleBlogImageUpload, async (req, res) => {
     
     const blog = new Blog(blogData);
     await blog.save();
-
+ 
     // Clear categories cache when new blog is created
     global.blogCategoriesCache = null;
-
+ 
     res.status(201).json({
       success: true,
       message: 'Blog post created successfully',
@@ -217,20 +246,29 @@ router.post('/', auth, handleBlogImageUpload, async (req, res) => {
         message: 'A blog with this slug already exists' 
       });
     }
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(e => e.message);
+      return res.status(400).json({ success: false, message: messages.join(', ') });
+    }
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
-
+ 
 // PUT /api/blog/:id - Update blog (Admin only)
 router.put('/:id', auth, handleBlogImageUpload, async (req, res) => {
   try {
     const blogData = req.body;
-    
+ 
     // Handle uploaded image
     if (req.file) {
       blogData.featuredImage = req.file.path; // Cloudinary URL
     }
-    
+ 
+    // If a title was sent without an explicit slug, regenerate it so it stays in sync
+    if (blogData.title && (!blogData.slug || !blogData.slug.trim())) {
+      blogData.slug = slugify(blogData.title);
+    }
+ 
     // Set publishedAt if isPublished is being set to true
     if (blogData.isPublished && !blogData.publishedAt) {
       blogData.publishedAt = new Date();
@@ -241,17 +279,17 @@ router.put('/:id', auth, handleBlogImageUpload, async (req, res) => {
       blogData,
       { new: true, runValidators: true }
     );
-
+ 
     if (!blog) {
       return res.status(404).json({
         success: false,
         message: 'Blog post not found'
       });
     }
-
+ 
     // Clear categories cache when blog is updated
     global.blogCategoriesCache = null;
-
+ 
     res.json({
       success: true,
       message: 'Blog post updated successfully',
@@ -265,10 +303,14 @@ router.put('/:id', auth, handleBlogImageUpload, async (req, res) => {
         message: 'A blog with this slug already exists'
       });
     }
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(e => e.message);
+      return res.status(400).json({ success: false, message: messages.join(', ') });
+    }
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
-
+ 
 // DELETE /api/blog/:id - Delete blog (Admin only)
 router.delete('/:id', auth, async (req, res) => {
   try {
@@ -280,10 +322,10 @@ router.delete('/:id', auth, async (req, res) => {
         message: 'Blog post not found' 
       });
     }
-
+ 
     // Clear categories cache when blog is deleted
     global.blogCategoriesCache = null;
-
+ 
     res.json({
       success: true,
       message: 'Blog post deleted successfully'
@@ -293,5 +335,5 @@ router.delete('/:id', auth, async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
-
+ 
 module.exports = router;

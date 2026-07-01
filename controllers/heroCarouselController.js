@@ -1,30 +1,27 @@
 const HeroCarousel = require('../models/heroCarousel');
 const fsPromises = require('fs').promises;
-const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
-
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const cloudinary = require('../config/cloudinary');
+ 
 // Path to JSON file where carousel items are stored
 const dataFilePath = path.join(__dirname, '../data/hero-carousel.json');
-
-// Ensure upload directory exists
-const uploadDir = path.join(__dirname, '../data/hero-carousel');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-// Configure storage
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadDir);
+ 
+// Configure Cloudinary storage (replaces local diskStorage)
+const storage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: 'decoryy/hero-carousel',
+    resource_type: 'auto', // handles both images and videos
+    allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'mov', 'webm'],
+    public_id: (req, file) => {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      return 'carousel-' + uniqueSuffix;
+    }
   },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const ext = path.extname(file.originalname);
-    cb(null, 'carousel-' + uniqueSuffix + ext);
-  }
 });
-
+ 
 // Configure multer
 const upload = multer({
   storage: storage,
@@ -40,7 +37,7 @@ const upload = multer({
     }
   }
 });
-
+ 
 // Helper function to read carousel data
 const readCarouselData = async () => {
   try {
@@ -51,7 +48,7 @@ const readCarouselData = async () => {
     return [];
   }
 };
-
+ 
 // Helper function to write carousel data
 const writeCarouselData = async (data) => {
   try {
@@ -62,7 +59,7 @@ const writeCarouselData = async (data) => {
     return false;
   }
 };
-
+ 
 // Get all carousel items
 const getAllCarouselItems = async (req, res) => {
   try {
@@ -73,7 +70,7 @@ const getAllCarouselItems = async (req, res) => {
     res.status(500).json({ message: "Error fetching carousel items", error: error.message });
   }
 };
-
+ 
 // Get single carousel item
 const getCarouselItem = async (req, res) => {
   try {
@@ -87,19 +84,19 @@ const getCarouselItem = async (req, res) => {
     res.status(500).json({ message: "Error fetching carousel item", error: error.message });
   }
 };
-
+ 
 // Get active carousel items (with optional city filter)
 const getActiveCarouselItems = async (req, res) => {
   try {
     const { city } = req.query;
     const query = { isActive: true };
-
+ 
     // If city provided, filter by city (with backward compatibility)
     if (city) {
       const City = require('../models/City');
       const mongoose = require('mongoose');
       let cityId = null;
-
+ 
       if (mongoose.Types.ObjectId.isValid(city)) {
         cityId = city;
       } else {
@@ -109,14 +106,14 @@ const getActiveCarouselItems = async (req, res) => {
           cityId = cityDoc._id;
         }
       }
-
+ 
       if (cityId) {
         // Find ONLY carousel items that have this city in their cities array
         // No backward compatibility - only show explicitly assigned carousel items
         query.cities = cityId;
       }
     }
-
+ 
     const items = await HeroCarousel.find(query).sort('order');
     res.json(items);
   } catch (error) {
@@ -124,13 +121,12 @@ const getActiveCarouselItems = async (req, res) => {
     res.status(500).json({ message: "Error fetching active carousel items", error: error.message });
   }
 };
-
+ 
 // Create carousel item with file upload
 const createCarouselItemWithFiles = async (req, res) => {
   const startTime = Date.now();
   try {
     console.log('=== Starting Hero Carousel Item Creation ===');
-    console.log('Headers:', req.headers);
     console.log('File received:', req.file ? {
       originalname: req.file.originalname,
       mimetype: req.file.mimetype,
@@ -138,7 +134,7 @@ const createCarouselItemWithFiles = async (req, res) => {
       path: req.file.path
     } : 'No file');
     console.log('Body data:', req.body);
-
+ 
     // Require image
     if (!req.file) {
       return res.status(400).json({
@@ -147,10 +143,11 @@ const createCarouselItemWithFiles = async (req, res) => {
     }
     const file = req.file;
     const itemData = req.body;
-
+ 
     // Log file processing time
     const fileProcessingTime = Date.now() - startTime;
     console.log(`File processing took: ${fileProcessingTime}ms`);
+ 
     // Validate required fields
     const requiredFields = ["title"];
     const missingFields = [];
@@ -162,17 +159,15 @@ const createCarouselItemWithFiles = async (req, res) => {
     if (missingFields.length > 0) {
       return res.status(400).json({ error: `Missing required fields: ${missingFields.join(', ')}` });
     }
-
-    // Process uploaded file: construct local URL
-    const baseUrl = process.env.BACKEND_URL || 'https://api.decoryy.com';
-    const imageUrl = (file && `${baseUrl}/decoryy/data/hero-carousel/${file.filename}`) || '';
-
+ 
+    // multer-storage-cloudinary already gives us the hosted CDN URL on file.path
+    const imageUrl = file.path || '';
+ 
     // Get current max order
     const maxOrderItem = await HeroCarousel.findOne().sort('-order');
     const newOrder = maxOrderItem ? maxOrderItem.order + 1 : 0;
     const newItem = new HeroCarousel({
       title: itemData.title.trim(),
-
       buttonText: (itemData.buttonText || 'Shop Now').trim(),
       buttonLink: (itemData.buttonLink || '/shop').trim(),
       image: imageUrl,
@@ -180,17 +175,17 @@ const createCarouselItemWithFiles = async (req, res) => {
       isActive: itemData.isActive === 'true' || itemData.isActive === true,
       order: newOrder
     });
-
+ 
     console.log('Saving carousel item to database...');
     const dbStartTime = Date.now();
     const savedItem = await newItem.save();
     const dbTime = Date.now() - dbStartTime;
     console.log(`Database save took: ${dbTime}ms`);
     console.log('Carousel item saved successfully:', savedItem);
-
+ 
     const totalTime = Date.now() - startTime;
     console.log(`Total creation time: ${totalTime}ms`);
-
+ 
     res.status(201).json({
       message: "Carousel item created successfully",
       item: savedItem,
@@ -212,31 +207,30 @@ const createCarouselItemWithFiles = async (req, res) => {
     });
   }
 };
-
+ 
 // Update carousel item with file upload
 const updateCarouselItemWithFiles = async (req, res) => {
   try {
     console.log('Updating carousel item with file:', req.file);
     console.log('Update data:', req.body);
-
+ 
     const id = req.params.id;
     if (!id) {
       return res.status(400).json({ message: "Carousel item ID is required" });
     }
-
+ 
     const file = req.file;
     const itemData = req.body;
-
+ 
     const existingItem = await HeroCarousel.findById(id);
     if (!existingItem) {
       return res.status(404).json({ message: "Carousel item not found" });
     }
-
-    // Update logic
+ 
+    // Update logic — multer-storage-cloudinary gives us the hosted URL on file.path
     let imageUrl = existingItem.image;
     if (file) {
-      const baseUrl = process.env.BACKEND_URL || 'https://api.decoryy.com';
-      imageUrl = `${baseUrl}/decoryy/data/hero-carousel/${file.filename}`;
+      imageUrl = file.path;
     }
     const updatedItem = {
       title: (itemData.title || existingItem.title).trim(),
@@ -247,16 +241,16 @@ const updateCarouselItemWithFiles = async (req, res) => {
       isActive: typeof itemData.isActive !== 'undefined' ? (itemData.isActive === 'true' || itemData.isActive === true) : existingItem.isActive,
       order: typeof itemData.order !== 'undefined' ? itemData.order : existingItem.order
     };
-
+ 
     // Log the update operation
     console.log('Updating carousel item with data:', {
       id,
       imageUrl: imageUrl,
       fileReceived: file ? file.originalname : 'none'
     });
-
+ 
     const savedItem = await HeroCarousel.findByIdAndUpdate(id, updatedItem, { new: true });
-
+ 
     res.json({
       message: "Carousel item updated successfully",
       item: savedItem,
@@ -267,7 +261,7 @@ const updateCarouselItemWithFiles = async (req, res) => {
     res.status(500).json({ message: "Error updating carousel item", error: error.message });
   }
 };
-
+ 
 // Delete carousel item
 const deleteCarouselItem = async (req, res) => {
   try {
@@ -275,20 +269,20 @@ const deleteCarouselItem = async (req, res) => {
     if (!item) {
       return res.status(404).json({ message: "Carousel item not found" });
     }
-
+ 
     // Reorder remaining items
     const remainingItems = await HeroCarousel.find().sort('order');
     for (let i = 0; i < remainingItems.length; i++) {
       await HeroCarousel.findByIdAndUpdate(remainingItems[i]._id, { order: i });
     }
-
+ 
     res.json({ message: "Carousel item deleted successfully" });
   } catch (error) {
     console.error('Error deleting carousel item:', error);
     res.status(500).json({ message: "Error deleting carousel item", error: error.message });
   }
 };
-
+ 
 // Toggle active status
 const toggleCarouselActive = async (req, res) => {
   try {
@@ -296,7 +290,7 @@ const toggleCarouselActive = async (req, res) => {
     if (!item) {
       return res.status(404).json({ message: "Carousel item not found" });
     }
-
+ 
     item.isActive = !item.isActive;
     await item.save();
     res.json(item);
@@ -305,7 +299,7 @@ const toggleCarouselActive = async (req, res) => {
     res.status(500).json({ message: "Error toggling carousel item status", error: error.message });
   }
 };
-
+ 
 // Update carousel items order
 const updateCarouselOrder = async (req, res) => {
   try {
@@ -319,7 +313,7 @@ const updateCarouselOrder = async (req, res) => {
     res.status(500).json({ message: "Error updating carousel order", error: error.message });
   }
 };
-
+ 
 module.exports = {
   uploadMiddleware: upload.single('image'),
   getAllCarouselItems,
@@ -330,4 +324,5 @@ module.exports = {
   deleteCarouselItem,
   toggleCarouselActive,
   updateCarouselOrder
-}; 
+};
+ 

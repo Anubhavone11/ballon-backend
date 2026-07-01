@@ -1,25 +1,21 @@
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
-
-// Ensure upload directory exists
-const uploadDir = path.join(__dirname, '../data/uploads');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-// Configure storage
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadDir);
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const cloudinary = require('../config/cloudinary');
+ 
+// Configure Cloudinary storage (replaces local diskStorage)
+const storage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: 'decoryy/uploads',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4'],
+    resource_type: 'auto', // auto-detects image vs video
+    public_id: (req, file) => {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      return 'file-' + uniqueSuffix;
+    }
   },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const ext = path.extname(file.originalname);
-    cb(null, 'file-' + uniqueSuffix + ext);
-  }
 });
-
+ 
 // Configure multer
 const upload = multer({
   storage: storage,
@@ -27,5 +23,5 @@ const upload = multer({
     fileSize: 10 * 1024 * 1024 // 10MB limit
   }
 });
-
-module.exports = upload; 
+ 
+module.exports = upload;

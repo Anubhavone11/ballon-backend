@@ -1,31 +1,25 @@
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
-
-// Ensure upload directory exists
-const sellerProfilesDir = path.join(__dirname, '../data/seller-profiles');
-
-if (!fs.existsSync(sellerProfilesDir)) {
-  fs.mkdirSync(sellerProfilesDir, { recursive: true });
-}
-
-// Configure storage for single passport verification photo
-const passportStorage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, sellerProfilesDir);
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const cloudinary = require('../config/cloudinary');
+ 
+// Configure Cloudinary storage for single passport verification photo
+const passportStorage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: 'decoryy/seller-profiles',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
+    public_id: (req, file) => {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      return 'seller-passport-' + uniqueSuffix;
+    }
   },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const ext = path.extname(file.originalname);
-    cb(null, 'seller-passport-' + uniqueSuffix + ext);
-  }
 });
-
+ 
 // Multer implementation explicitly targeting the passportPhoto field
 const uploadPassportPhoto = multer({
   storage: passportStorage,
   limits: {
-    fileSize: 5 * 1024 * 1024, // Optimized standard 5MB limit
+    fileSize: 5 * 1024 * 1024, // 5MB limit
     files: 1
   },
   fileFilter: (req, file, cb) => {
@@ -35,8 +29,8 @@ const uploadPassportPhoto = multer({
       cb(new Error('Please upload a valid image file.'), false);
     }
   }
-}).single('passportPhoto'); // ◄ FIXED: Field key token matches frontend directly now
-
+}).single('passportPhoto'); // field key matches frontend
+ 
 // Middleware for handling passport photo upload execution flow
 const handleProfileImage = (req, res, next) => {
   uploadPassportPhoto(req, res, (err) => {
@@ -57,22 +51,17 @@ const handleProfileImage = (req, res, next) => {
         message: err.message
       });
     }
-
-    // ✨ FIX: Construct a complete URL including the exact filename and extension
+ 
+    // multer-storage-cloudinary already gives us the full hosted URL on req.file.path
     if (req.file) {
-      const baseUrl = process.env.BACKEND_URL || 'http://localhost:5175';
-      
-      // We append the clean forward-slash path structure using the exact generated filename
-      req.file.generatedUrl = `${baseUrl}/data/seller-profiles/${req.file.filename}`;
-      
-      // Keep req.file.path intact as the absolute fallback just in case your controller reads it
-      req.file.path = `${baseUrl}/data/seller-profiles/${req.file.filename}`;
+      req.file.generatedUrl = req.file.path; // Cloudinary CDN URL
     }
-
+ 
     next();
   });
 };
+ 
 module.exports = {
   handleProfileImage,
-  cloudinary: null
+  cloudinary
 };

@@ -1,25 +1,20 @@
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
-
-// Ensure upload directory exists
-const uploadDir = path.join(__dirname, '../data/blog-images');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-// Configure storage
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadDir);
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const cloudinary = require('../config/cloudinary');
+ 
+// Configure Cloudinary storage for blog featured image
+const storage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: 'decoryy/blog-images',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp'],
+    public_id: (req, file) => {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      return 'blog-' + uniqueSuffix;
+    }
   },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const ext = path.extname(file.originalname);
-    cb(null, 'blog-' + uniqueSuffix + ext);
-  }
 });
-
+ 
 // Multer configuration for blog featured image
 const uploadFeaturedImage = multer({
   storage: storage,
@@ -36,7 +31,7 @@ const uploadFeaturedImage = multer({
     }
   }
 }).single('featuredImage');
-
+ 
 // Middleware to handle blog image upload
 const handleBlogImageUpload = (req, res, next) => {
   uploadFeaturedImage(req, res, function (err) {
@@ -53,18 +48,18 @@ const handleBlogImageUpload = (req, res, next) => {
         details: err.message
       });
     }
-
-    // Transform path to URL if file exists
+ 
+    // multer-storage-cloudinary already gives us the full hosted URL on req.file.path
     if (req.file) {
-      const baseUrl = process.env.BACKEND_URL || 'https://api.decoryy.com/api';
-      req.file.path = `${baseUrl}/decoryy/data/blog-images/${req.file.filename}`;
+      req.file.generatedUrl = req.file.path; // Cloudinary CDN URL
     }
-
+ 
     next();
   });
 };
-
+ 
 module.exports = {
   handleBlogImageUpload,
-  hasCloudinaryCredentials: true
+  cloudinary
 };
+ 
