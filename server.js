@@ -33,7 +33,7 @@ const chatRoutes = require('./routes/chatRoutes');
 const settingsController = require('./controllers/settingsController');
 const { initSocket } = require('./socket/socketSetup'); 
 const { startMatchmakingSweep } = require('./controllers/Matchmakingsweep');
-const { initWhatsApp } = require('./controllers/bookingController'); // ◄ WhatsApp init
+// const { initWhatsApp } = require('./controllers/bookingController'); // ◄ WhatsApp init
  
 const app = express();
  
@@ -236,7 +236,7 @@ async function startServer() {
     console.log("✅ MongoDB connected successfully");
  
     // ◄ Initialize WhatsApp AFTER MongoDB is ready — RemoteAuth needs the DB
-    initWhatsApp();
+    // initWhatsApp();
     console.log('📱 WhatsApp client initializing...');
  
     try {
