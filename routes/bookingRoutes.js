@@ -1,6 +1,6 @@
 const express = require("express");
 const router = express.Router();
-
+const Booking = require("../models/Booking");
 const bookingController = require("../controllers/bookingController");
 
 // Import specific authentication middlewares
@@ -64,5 +64,9 @@ router.patch(
   sellerAuth,
   bookingController.completeBooking
 );
-
+router.patch('/:id/status', async (req, res) => {
+  const { status } = req.body;
+  const booking = await Booking.findByIdAndUpdate(req.params.id, { status }, { new: true });
+  res.json({ success: true, booking });
+});
 module.exports = router;
