@@ -86,6 +86,19 @@ const bookingSchema = new mongoose.Schema(
       }
     },
 
+    // 🚀 ADDED: customer's WhatsApp number so we can message them once a seller accepts
+    customerPhone: {
+      type: String,
+      default: ""
+    },
+
+    // 🚀 ADDED: live GPS location of the assigned vendor, updated every few seconds
+    vendorLocation: {
+      lat: { type: Number, default: null },
+      lng: { type: Number, default: null },
+      updatedAt: { type: Date, default: null }
+    },
+
     routingQueue: [
       {
         type: mongoose.Schema.Types.ObjectId,
