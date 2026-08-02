@@ -1,23 +1,19 @@
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const cloudinary = require('../config/cloudinary');
 
-// Ensure upload directory exists
-const uploadDir = path.join(__dirname, '../data/subcategories');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-// Configure storage for subcategory images
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadDir);
+// Configure Cloudinary storage for subcategory images
+const storage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: 'decoryy/subcategories',
+    resource_type: 'auto', // handles images and videos
+    allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'mov', 'webm'],
+    public_id: (req, file) => {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      return 'subcat-' + uniqueSuffix;
+    }
   },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const ext = path.extname(file.originalname);
-    cb(null, 'subcat-' + uniqueSuffix + ext);
-  }
 });
 
 // Multer configuration for subcategory image upload
@@ -25,10 +21,9 @@ const uploadSubCategoryImage = multer({
   storage: storage,
   limits: {
     fileSize: 5 * 1024 * 1024, // 5MB limit
-    files: 1 // Only 1 file
+    files: 1
   },
   fileFilter: (req, file, cb) => {
-    // Check file type (images and videos)
     if (file.mimetype.startsWith('image/') || file.mimetype.startsWith('video/')) {
       cb(null, true);
     } else {
@@ -58,17 +53,11 @@ const handleSubCategoryImage = (req, res, next) => {
       });
     }
 
-    // Transform path to URL
-    if (req.file) {
-      const baseUrl = process.env.BACKEND_URL || 'https://api.decoryy.com';
-      req.file.path = `${baseUrl}/decoryy/data/subcategories/${req.file.filename}`;
-    }
-
+    // req.file.path is already the full Cloudinary CDN URL — no transform needed
     next();
   });
 };
 
 module.exports = {
-  handleSubCategoryImage,
-  cloudinary: null
+  handleSubCategoryImage
 };

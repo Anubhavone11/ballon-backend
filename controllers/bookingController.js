@@ -1,147 +1,10 @@
 const mongoose = require("mongoose");
-const Booking = require("../models/Booking");
+const jwt = require("jsonwebtoken");
 const Seller = require("../models/Seller");
 const Product = require("../models/Product");
+const Booking = require("../models/Booking");
 const axios = require("axios");
 
-// const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
-// const qrcode = require('qrcode-terminal');
-
-// ─── WhatsApp client setup ────────────────────────────────────────────────────
-// NOTE: WhatsApp sending has been migrated to the Meta Graph (Cloud) API —
-// see sendJobOfferToSeller() below, which posts directly to
-// graph.facebook.com. The old whatsapp-web.js/Puppeteer-based client is no
-// longer used, so there is nothing left to initialize. `initWhatsApp` is kept
-// below as a harmless no-op so server.js (which still calls it on startup)
-// doesn't crash with "initWhatsApp is not a function". If you're sure
-// server.js no longer needs it, feel free to remove both the export here and
-// the call in server.js.
-
-// let isWAReady = false;
-// let whatsappClient = null;
-// let _createClient = null;
-// let isRebuilding = false; // guard so we never stack multiple simultaneous rebuilds
-
-// // Known "the underlying Chromium page/frame is dead" error signatures.
-// // This is a long-standing, still-open upstream bug in whatsapp-web.js
-// // (see pedroslopez/whatsapp-web.js#5728, #5776) — the page context dies
-// // unpredictably after ~1-2 hours of runtime and the ONLY fix is to
-// // destroy + recreate the client. We can't prevent it, only detect it
-// // fast and self-heal instead of needing a manual `pm2 restart`.
-// const PUPPETEER_CRASH_PATTERNS = [
-//   'detached Frame',
-//   'LifecycleWatcher',
-//   'Execution context was destroyed',
-//   'Target closed',
-//   'Session closed',
-//   'Protocol error',
-//   'has disconnected',
-// ];
-
-// const isPuppeteerCrashError = (err) =>
-//   PUPPETEER_CRASH_PATTERNS.some((msg) => err?.message?.includes(msg));
-
-// // Central, de-duplicated rebuild routine. Every crash-detection path
-// // (disconnected, auth_failure, uncaughtException, page crash, and now
-// // send-time detection) funnels through here so we never end up with
-// // two clients racing each other.
-// const rebuildClient = (reason, delayMs = 10000) => {
-//   if (isRebuilding) {
-//     console.log(`🔁 Rebuild already in progress, ignoring duplicate trigger (${reason}).`);
-//     return;
-//   }
-//   isRebuilding = true;
-//   isWAReady = false;
-//   console.warn(`⚠️ Rebuilding WhatsApp client — reason: ${reason}. Rebuilding in ${delayMs / 1000}s...`);
-
-//   const oldClient = whatsappClient;
-//   setTimeout(async () => {
-//     try { await oldClient?.destroy(); } catch (_) {}
-//     whatsappClient = _createClient();
-//     whatsappClient.initialize().catch((err) => {
-//       console.error('❌ WhatsApp re-initialize() threw:', err.message);
-//     });
-//     isRebuilding = false;
-//   }, delayMs);
-// };
-
-// const initWhatsApp = () => {
-//   _createClient = () => {
-//     const client = new Client({
-//       authStrategy: new LocalAuth({
-//         clientId: 'decoryy_production',
-//         dataPath: './.wwebjs_auth',
-//       }),
-//       puppeteer: {
-//         headless: true,
-//         args: [
-//           '--no-sandbox',
-//           '--disable-setuid-sandbox',
-//           '--disable-dev-shm-usage',
-//           '--disable-gpu',
-//           '--no-first-run',
-//           '--no-zygote',
-//           '--disable-extensions',
-//           '--disable-background-networking',
-//           '--disable-features=TranslateUI',
-//           '--disable-ipc-flooding-protection',
-//         ],
-//       },
-//     });
-
-//     client.on('qr', (qr) => {
-//       console.log('▼ Scan this QR code ONCE — session saved to .wwebjs_auth folder ▼');
-//       qrcode.generate(qr, { small: true });
-//     });
-
-//     client.on('ready', () => {
-//       isWAReady = true;
-//       console.log('✅ Decoryy WhatsApp Engine is live and ready.');
-
-//       // Proactively catch tab/page crashes the moment they happen,
-//       // instead of only discovering it on the next failed sendMessage.
-//       try {
-//         client.pupPage?.on('error', (err) => {
-//           rebuildClient(`page 'error' event: ${err.message}`, 8000);
-//         });
-//         client.pupPage?.on('close', () => {
-//           if (isWAReady) rebuildClient("page 'close' event (unexpected)", 8000);
-//         });
-//       } catch (_) { /* older puppeteer-core versions may not expose pupPage the same way */ }
-//     });
-
-//     client.on('disconnected', (reason) => {
-//       rebuildClient(`disconnected: ${reason}`, 10000);
-//     });
-
-//     client.on('auth_failure', (msg) => {
-//       rebuildClient(`auth_failure: ${msg}`, 15000);
-//     });
-
-//     return client;
-//   };
-
-//   whatsappClient = _createClient();
-//   whatsappClient.initialize().catch((err) => {
-//     console.error('❌ WhatsApp initialize() threw:', err.message);
-//   });
-// };
-
-// // Belt-and-suspenders: if a crash somehow still escapes as an
-// // uncaughtException, route it through the same rebuild function
-// // (rebuildClient's isRebuilding guard means this never double-fires).
-// process.on('uncaughtException', (err) => {
-//   if (isPuppeteerCrashError(err)) {
-//     rebuildClient(`uncaughtException: ${err.message}`, 10000);
-//   } else {
-//     console.error('💥 Unhandled exception (non-Puppeteer):', err);
-//     process.exit(1);
-//   }
-// });
-
-// Export so server.js can call after mongoose connects.
-// This is now a no-op — kept only so server.js's existing startup call
-// (`initWhatsApp()`) doesn't throw "initWhatsApp is not a function".
 exports.initWhatsApp = () => {
   console.log("ℹ️ initWhatsApp() called — this is now a no-op. WhatsApp messages are sent via the Meta Graph API (see sendJobOfferToSeller), not whatsapp-web.js.");
 };
@@ -153,8 +16,13 @@ const METRO_INNER_RADIUS           = parseInt(process.env.METRO_INNER_RADIUS, 10
 const METRO_MAX_CUTOFF             = parseInt(process.env.METRO_MAX_CUTOFF, 10)             || 40000;
 const ABSOLUTE_MAX_BROADCAST_LIMIT = parseInt(process.env.ABSOLUTE_MAX_BROADCAST_LIMIT, 10) || 12;
 const ANTI_BAN_DELAY_MS            = parseInt(process.env.ANTI_BAN_DELAY_MS, 10)            || 40000;
+const APP_BASE_URL                 = process.env.APP_BASE_URL || "https://decoryy.com";
+const API_BASE_URL                 = process.env.API_BASE_URL || "https://api.decoryy.com/api/bookings";
+const TRACKING_TOKEN_SECRET        = process.env.TRACKING_TOKEN_SECRET; // REQUIRED — set in .env
+const TRACKING_TOKEN_EXPIRY        = process.env.TRACKING_TOKEN_EXPIRY || "24h";
 
-const ACTIVE_STATUSES = ["seller_assigned", "cancelled", "completed"];
+// Statuses that mean "this job is decided, stop offering it to other sellers"
+const ACTIVE_STATUSES = ["seller_assigned", "accepted", "cancelled", "completed"];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -185,6 +53,11 @@ const toWhatsAppId = (rawPhone) => {
   return `${withCountryCode}@c.us`;
 };
 
+const normalizePhone = (rawPhone) => {
+  const clean = rawPhone.replace(/\D/g, "");
+  return clean.length === 10 ? `91${clean}` : clean;
+};
+
 // ─── Download image to base64 via axios (NO Puppeteer involvement) ────────────
 
 const downloadImageAsBase64 = async (url) => {
@@ -204,6 +77,38 @@ const downloadImageAsBase64 = async (url) => {
 const toWhatsAppSafeImageUrl = (cloudinaryUrl) => {
   if (!cloudinaryUrl || !cloudinaryUrl.includes("/upload/")) return cloudinaryUrl;
   return cloudinaryUrl.replace("/upload/", "/upload/f_jpg,q_auto/");
+};
+
+// ─── Tracking token (JWT) ──────────────────────────────────────────────────────
+// This is what goes into the "Track Order" button URL suffix:
+// https://decoryy.com/track/<token>
+
+const generateTrackingToken = (bookingId) => {
+  if (!TRACKING_TOKEN_SECRET) {
+    throw new Error("TRACKING_TOKEN_SECRET is not set in environment variables.");
+  }
+  return jwt.sign({ bookingId: String(bookingId) }, TRACKING_TOKEN_SECRET, {
+    expiresIn: TRACKING_TOKEN_EXPIRY,
+  });
+};
+
+const verifyTrackingToken = (token) => {
+  if (!TRACKING_TOKEN_SECRET) {
+    throw new Error("TRACKING_TOKEN_SECRET is not set in environment variables.");
+  }
+  return jwt.verify(token, TRACKING_TOKEN_SECRET); // throws if invalid/expired
+};
+
+// Formats a JS Date into "DD Mon YYYY, hh:mm AM/PM" for the {{4}} template variable
+const formatEventDateTime = (date) => {
+  if (!date) return "To be confirmed";
+  return new Date(date).toLocaleString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 };
 
 // ─── WhatsApp job offer dispatcher ───────────────────────────────────────────
@@ -312,6 +217,11 @@ const sendJobOfferToSeller = async (seller, booking) => {
 
     console.log("✅ Template sent:", JSON.stringify(response.data, null, 2));
 
+    const acceptUrl  = `${API_BASE_URL}/accept/${booking._id}?sellerId=${seller._id}`;
+    const declineUrl = `${API_BASE_URL}/reject/${booking._id}?sellerId=${seller._id}`;
+    console.log(`🔗 Accept link:  ${acceptUrl}`);
+    console.log(`🔗 Decline link: ${declineUrl}`);
+
     return true;
 
   } catch(err){
@@ -321,6 +231,63 @@ const sendJobOfferToSeller = async (seller, booking) => {
     return false;
   }
 };
+
+// ─── WhatsApp: notify customer that a vendor accepted (decoryy_customer_vendor_assigned) ─
+
+const sendVendorAssignedToCustomer = async (booking, seller) => {
+  try {
+    if (!booking.customerPhone) {
+      console.log(`⚠️ Booking ${booking._id} has no customerPhone — skipping customer WhatsApp.`);
+      return false;
+    }
+
+    const toPhone = normalizePhone(booking.customerPhone);
+    const eventDateTime = formatEventDateTime(booking.scheduledTime || booking.createdAt);
+
+    console.log(`📨 [customer-notify] Sending to ${toPhone} for booking ${booking._id}`);
+
+    const response = await axios.post(
+      `https://graph.facebook.com/v23.0/${process.env.WA_PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to: toPhone,
+        type: "template",
+        template: {
+          name: "decoryy_customer_vendor_assigned",
+          language: {
+            code: "en"
+          },
+          components: [
+            {
+              type: "body",
+              parameters: [
+                { type: "text", text: booking.serviceDetails.name },                // {{1}} Customer Name
+                { type: "text", text: seller.name },                                // {{2}} Vendor Name
+                { type: "text", text: booking.selectedProductId?.name || "Decor" },  // {{3}} Service Name
+                { type: "text", text: seller.businessPhone || "N/A" },              // {{4}} Vendor Contact
+                { type: "text", text: booking.selectedProductId?.instantDeliveryTime },                              // {{5}} Event Date & Time
+              ]
+            }
+          ]
+        }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.WA_ACCESS_TOKEN}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    console.log("✅ Customer vendor-assigned template sent:", JSON.stringify(response.data, null, 2));
+    return true;
+
+  } catch (err) {
+    console.log("❌ Customer vendor-assigned template FAILED:", err.response?.data || err.message);
+    return false;
+  }
+};
+
 // ─── Matchmaking pipeline ─────────────────────────────────────────────────────
 
 const processMatchmakingPipeline = async (bookingId) => {
@@ -399,7 +366,7 @@ exports.createInstantBooking = async (req, res) => {
     const {
       name, note, locationAddress,
       lat, lng, city, guestCount, eventType,
-      selectedProductId, estimatedPrice,
+      selectedProductId, estimatedPrice, customerPhone,
     } = req.body;
 
     const userId    = req.user.id;
@@ -480,10 +447,11 @@ exports.createInstantBooking = async (req, res) => {
     const booking = await Booking.create({
       userId,
       bookingType: "instant",
-      serviceDetails: { name, note, guestCount, eventType, city },
+      serviceDetails: { name, note, guestCount, eventType },
       pickupLocation: { address: locationAddress, coordinates: [longitude, latitude] },
       selectedProductId: selectedProductId || null,
       estimatedPrice: estimatedPrice || 0,
+      customerPhone: customerPhone || "",
       routingQueue,
       currentRoutingIndex: 0,
     });
@@ -517,6 +485,83 @@ exports.getUserBookings = async (req, res) => {
   } catch (err) {
     console.error("getUserBookings error:", err);
     return res.status(500).json({ success: false, message: "Could not fetch booking history." });
+  }
+};
+
+// ─── Update vendor GPS location (called every few seconds from seller's phone) ─
+
+exports.updateVendorLocation = async (req, res) => {
+  try {
+    const { bookingId } = req.params;
+    const { lat, lng } = req.body;
+
+    if (!isValidObjectId(bookingId) || !isValidCoordinate(lat, lng)) {
+      return res.status(400).json({ success: false, message: "Invalid booking id or coordinates." });
+    }
+
+    await Booking.findByIdAndUpdate(bookingId, {
+      vendorLocation: { lat, lng, updatedAt: new Date() },
+    });
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("updateVendorLocation error:", err);
+    return res.status(500).json({ success: false });
+  }
+};
+
+// ─── Get vendor location by raw bookingId (used internally / seller side) ────
+
+exports.getVendorLocation = async (req, res) => {
+  try {
+    const { bookingId } = req.params;
+    if (!isValidObjectId(bookingId)) {
+      return res.status(400).json({ success: false, message: "Invalid booking id." });
+    }
+
+    const booking = await Booking.findById(bookingId).select("vendorLocation status");
+    if (!booking) {
+      return res.status(404).json({ success: false, message: "Booking not found." });
+    }
+
+    return res.json({ success: true, location: booking.vendorLocation || null, status: booking.status });
+  } catch (err) {
+    console.error("getVendorLocation error:", err);
+    return res.status(500).json({ success: false });
+  }
+};
+
+// ─── Get vendor location by tracking token (used by the customer's public track page) ─
+// This is what https://decoryy.com/track/<token> calls.
+
+exports.getVendorLocationByToken = async (req, res) => {
+  try {
+    const { token } = req.params;
+
+    let payload;
+    try {
+      payload = verifyTrackingToken(token);
+    } catch (err) {
+      return res.status(401).json({ success: false, message: "This tracking link is invalid or has expired." });
+    }
+
+    const booking = await Booking.findById(payload.bookingId)
+      .select("vendorLocation status serviceDetails sellerId")
+      .populate("sellerId", "name businessPhone");
+
+    if (!booking) {
+      return res.status(404).json({ success: false, message: "Booking not found." });
+    }
+
+    return res.json({
+      success: true,
+      location: booking.vendorLocation || null,
+      status: booking.status,
+      vendor: booking.sellerId ? { name: booking.sellerId.name, phone: booking.sellerId.businessPhone } : null,
+    });
+  } catch (err) {
+    console.error("getVendorLocationByToken error:", err);
+    return res.status(500).json({ success: false });
   }
 };
 
@@ -580,7 +625,10 @@ exports.getBookingStatus = async (req, res) => {
   }
 };
 
-// ─── Seller accept booking ────────────────────────────────────────────────────
+// ─── Seller accept booking (seller taps the WhatsApp button link) ────────────
+// NOTE: this used to be defined TWICE in the file. The second definition was
+// silently overwriting the first (the one that actually sent WhatsApp
+// messages), which is why nothing fired after acceptance. Merged into one.
 
 exports.acceptBooking = async (req, res) => {
   const session = await mongoose.startSession();
@@ -589,11 +637,15 @@ exports.acceptBooking = async (req, res) => {
     const querySellerId  = req.query.sellerId;
     const sellerId       = (querySellerId && isValidObjectId(querySellerId)) ? querySellerId : req.seller?.id;
 
+    console.log(`\n➡️  [accept] Incoming accept request | booking=${bookingId} seller=${sellerId}`);
+
     if (!sellerId || !isValidObjectId(bookingId)) {
+      console.log("❌ [accept] Invalid seller or booking id.");
       return res.status(401).send(errorPage("Invalid seller or booking ID."));
     }
 
     let resultBooking = null;
+    let resultSeller = null;
 
     await session.withTransaction(async () => {
       const booking = await Booking.findOne({
@@ -603,6 +655,7 @@ exports.acceptBooking = async (req, res) => {
       }).session(session);
 
       if (!booking) {
+        console.log("🛑 [accept] Offer already taken or expired.");
         const err = new Error("This offer has already been taken or has expired.");
         err.code = "OFFER_UNAVAILABLE";
         throw err;
@@ -615,6 +668,7 @@ exports.acceptBooking = async (req, res) => {
       );
 
       if (!seller) {
+        console.log("🛑 [accept] Seller already busy on another booking.");
         const err = new Error("You are currently assigned to another booking.");
         err.code = "SELLER_BUSY";
         throw err;
@@ -628,7 +682,25 @@ exports.acceptBooking = async (req, res) => {
 
       await booking.save({ session });
       resultBooking = booking;
+      resultSeller  = seller;
+
+      console.log(`✅ [accept] Booking ${bookingId} locked to seller ${seller.name} (${seller._id})`);
     });
+
+    // Populate product info needed for the templates, then fire both WhatsApp
+    // notifications in the background — don't block the HTTP response the
+    // seller's browser is waiting on.
+    Booking.findById(resultBooking._id)
+      .populate("selectedProductId")
+      .then((populatedBooking) => {
+        console.log(`📨 [accept] Sending post-accept WhatsApp message to customer for booking ${bookingId}...`);
+        // Vendor no longer gets a WhatsApp message here — only the customer is notified.
+        return sendVendorAssignedToCustomer(populatedBooking, resultSeller); // → customer: "Vendor Assigned" template (no track button)
+      })
+      .then((customerOk) => {
+        console.log(`📨 [accept] Customer message sent: ${customerOk}`);
+      })
+      .catch((err) => console.error("❌ [accept] Post-accept notify error:", err));
 
     if (req.xhr || req.headers.accept?.includes('application/json') || !req.query.sellerId) {
       return res.json({ success: true, message: "Booking accepted!", booking: resultBooking });
