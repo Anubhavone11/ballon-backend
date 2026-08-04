@@ -12,8 +12,6 @@ exports.initWhatsApp = () => {
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 const OFFER_TIMEOUT_MS             = parseInt(process.env.MATCHMAKING_OFFER_TIMEOUT_MS, 10) || 60000;
-const METRO_INNER_RADIUS           = parseInt(process.env.METRO_INNER_RADIUS, 10)           || 15000;
-const METRO_MAX_CUTOFF             = parseInt(process.env.METRO_MAX_CUTOFF, 10)             || 40000;
 const ABSOLUTE_MAX_BROADCAST_LIMIT = parseInt(process.env.ABSOLUTE_MAX_BROADCAST_LIMIT, 10) || 12;
 const ANTI_BAN_DELAY_MS            = parseInt(process.env.ANTI_BAN_DELAY_MS, 10)            || 40000;
 const APP_BASE_URL                 = process.env.APP_BASE_URL || "https://decoryy.com";
@@ -33,16 +31,7 @@ const isValidCoordinate = (lat, lng) =>
 
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 
-const toRadians = (deg) => (deg * Math.PI) / 180;
-
-const haversineDistanceMeters = (lat1, lng1, lat2, lng2) => {
-  const dLat = toRadians(lat2 - lat1);
-  const dLng = toRadians(lng2 - lng1);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(dLng / 2) ** 2;
-  return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-};
+const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -340,7 +329,7 @@ const processMatchmakingPipeline = async (bookingId) => {
       return true;
     });
 
-    console.log(`📡 Sending offers to ${dedupedQueue.length} decorator(s) in ${updatedBooking.serviceDetails?.city || 'city'}...`);
+    console.log(`📡 Sending offers to ${dedupedQueue.length} decorator(s) in ${updatedBooking.pickupLocation?.city || 'city'}, ${updatedBooking.pickupLocation?.state || 'state'}...`);
 
     for (const seller of dedupedQueue) {
       const current = await Booking.findById(bookingId).select("status").lean();
@@ -360,12 +349,22 @@ const processMatchmakingPipeline = async (bookingId) => {
 };
 
 // ─── Create instant booking ───────────────────────────────────────────────────
+// Seller matching: sellers no longer carry GPS coordinates (the Seller
+// schema is address-based only — state / city / address / pincode), so
+// matching is done by STATE + CITY first (both exact match, case-insensitive
+// — this is a hard filter, not just a ranking signal, so a job in
+// "Pune, Maharashtra" can never be routed to a same-named city in a
+// different state). Within that state+city pool, sellers whose PINCODE
+// matches the customer's pincode are ranked ahead of the rest. Rating and
+// premium status break remaining ties. This replaces the old $near
+// geospatial query, which relied on a `location` field the Seller model
+// no longer has.
 
 exports.createInstantBooking = async (req, res) => {
   try {
     const {
       name, note, locationAddress,
-      lat, lng, city, guestCount, eventType,
+      lat, lng, state, city, pincode, guestCount, eventType,
       selectedProductId, estimatedPrice, customerPhone,
     } = req.body;
 
@@ -373,10 +372,14 @@ exports.createInstantBooking = async (req, res) => {
     const latitude  = parseFloat(lat);
     const longitude = parseFloat(lng);
 
-    if (!name || !locationAddress || !city) {
+    // State, city, and pincode are all required server-side now — pincode
+    // was previously read but never enforced, which meant a client that
+    // skipped the frontend validation (or hit the API directly) could still
+    // create a booking with no pincode. locationAddress stays required too.
+    if (!name || !locationAddress || !state || !city || !pincode) {
       return res.status(400).json({
         success: false,
-        message: "Name, address, and city are all required.",
+        message: "Name, address, state, city, and pincode are all required.",
       });
     }
 
@@ -387,60 +390,61 @@ exports.createInstantBooking = async (req, res) => {
       });
     }
 
-    let nearbySellers = await Seller.find({
+    const normalizedState   = state.trim();
+    const normalizedCity    = city.trim();
+    const normalizedPincode = pincode.toString().trim();
+
+    if (!/^\d{6}$/.test(normalizedPincode)) {
+      return res.status(400).json({
+        success: false,
+        message: "Pincode must be a valid 6-digit number.",
+      });
+    }
+
+    const statePattern = new RegExp(`^${escapeRegex(normalizedState)}$`, "i");
+    const cityPattern  = new RegExp(`^${escapeRegex(normalizedCity)}$`, "i");
+
+    // Over-fetch a bit before ranking/trimming to the broadcast limit, so we
+    // have enough candidates to properly rank pincode matches to the front.
+    const localSellers = await Seller.find({
       approved: true,
       blocked: false,
       isOnline: true,
       isAllocated: false,
-      location: {
-        $near: {
-          $geometry: { type: "Point", coordinates: [longitude, latitude] },
-          $maxDistance: METRO_INNER_RADIUS,
-        },
-      },
-    }).limit(ABSOLUTE_MAX_BROADCAST_LIMIT);
+      state: statePattern,
+      city: cityPattern,
+    }).limit(ABSOLUTE_MAX_BROADCAST_LIMIT * 3);
 
-    if (!nearbySellers.length) {
-      nearbySellers = await Seller.find({
-        approved: true,
-        blocked: false,
-        isOnline: true,
-        isAllocated: false,
-        location: {
-          $near: {
-            $geometry: { type: "Point", coordinates: [longitude, latitude] },
-            $maxDistance: METRO_MAX_CUTOFF,
-          },
-        },
-      }).limit(ABSOLUTE_MAX_BROADCAST_LIMIT);
-    }
-
-    if (!nearbySellers.length) {
+    if (!localSellers.length) {
       return res.status(404).json({
         success: false,
         code: "NO_LOCAL_VENDORS",
-        message: `No decorators are available in ${city} right now. Please try again shortly.`,
+        message: `No decorators are available in ${normalizedCity}, ${normalizedState} right now. Please try again shortly.`,
       });
     }
 
-    console.log(`\n🔍 Ranking ${nearbySellers.length} seller(s) in ${city.toUpperCase()}`);
+    console.log(
+      `\n🔍 Ranking ${localSellers.length} seller(s) in ${normalizedCity.toUpperCase()}, ${normalizedState.toUpperCase()} (pincode ${normalizedPincode})`
+    );
 
-    const rankedSellers = nearbySellers
+    const rankedSellers = localSellers
       .map((seller) => {
-        const [sellerLng, sellerLat] = seller.location.coordinates;
-        const distanceM = haversineDistanceMeters(sellerLat, sellerLng, latitude, longitude);
-        const rating    = seller.rating && seller.rating > 0 ? seller.rating : 1.0;
-        const premiumMultiplier = seller.isPremium ? 0.80 : 1.0;
-        const score     = (distanceM * premiumMultiplier) / rating;
+        const rating = seller.rating && seller.rating > 0 ? seller.rating : 1.0;
+        const pincodeMatch = seller.pincode === normalizedPincode;
+        const premiumBonus = seller.isPremium ? 0.2 : 0;
+        // Lower score wins. A pincode match gets a large fixed head start
+        // over non-matches; rating and premium status break remaining ties.
+        const score = (pincodeMatch ? 0 : 1000) - rating - premiumBonus;
 
         console.log(
-          `  • ${seller.name} | ${(distanceM / 1000).toFixed(2)} km | ` +
-          `Rating: ${rating} | Premium: ${seller.isPremium ? 'Yes' : 'No'} | Score: ${score.toFixed(0)}`
+          `  • ${seller.name} | Pincode: ${seller.pincode || '—'}${pincodeMatch ? ' ✅ match' : ''} | ` +
+          `Rating: ${rating} | Premium: ${seller.isPremium ? 'Yes' : 'No'} | Score: ${score.toFixed(2)}`
         );
 
         return { id: seller._id, score };
       })
-      .sort((a, b) => a.score - b.score);
+      .sort((a, b) => a.score - b.score)
+      .slice(0, ABSOLUTE_MAX_BROADCAST_LIMIT);
 
     const routingQueue = rankedSellers.map((s) => s.id);
 
@@ -448,7 +452,13 @@ exports.createInstantBooking = async (req, res) => {
       userId,
       bookingType: "instant",
       serviceDetails: { name, note, guestCount, eventType },
-      pickupLocation: { address: locationAddress, coordinates: [longitude, latitude] },
+      pickupLocation: {
+        address: locationAddress,
+        coordinates: [longitude, latitude],
+        state: normalizedState,
+        city: normalizedCity,
+        pincode: normalizedPincode,
+      },
       selectedProductId: selectedProductId || null,
       estimatedPrice: estimatedPrice || 0,
       customerPhone: customerPhone || "",

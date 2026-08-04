@@ -46,7 +46,6 @@ const bookingSchema = new mongoose.Schema(
     },
 
     serviceDetails: {
-      // 🚀 ADDED: Explicit name field as requested
       name: {
         type: String,
         required: [true, "Customer name is required"],
@@ -80,19 +79,38 @@ const bookingSchema = new mongoose.Schema(
         required: true
       },
       coordinates: {
-        type: [Number], // [lng, lat]
+        type: [Number], // [lng, lat] — kept for map display / tracking, NOT used for seller matching
         required: true,
         default: [0, 0]
+      },
+      // 🚀 State the booking falls under. Used together with city (and,
+      // for ranking, pincode) to match sellers — Seller records are
+      // address-based (state / city / address / pincode), not geo-based.
+      state: {
+        type: String,
+        default: "",
+        trim: true
+      },
+      city: {
+        type: String,
+        default: "",
+        trim: true
+      },
+      // Customer's pincode, used (alongside state + city) to rank/match sellers.
+      pincode: {
+        type: String,
+        default: "",
+        trim: true
       }
     },
 
-    // 🚀 ADDED: customer's WhatsApp number so we can message them once a seller accepts
+    // customer's WhatsApp number so we can message them once a seller accepts
     customerPhone: {
       type: String,
       default: ""
     },
 
-    // 🚀 ADDED: live GPS location of the assigned vendor, updated every few seconds
+    // live GPS location of the assigned vendor, updated every few seconds
     vendorLocation: {
       lat: { type: Number, default: null },
       lng: { type: Number, default: null },
@@ -197,5 +215,9 @@ bookingSchema.index({ bookingType: 1 });
 bookingSchema.index({ createdAt: -1 });
 bookingSchema.index({ scheduledTime: 1 });
 bookingSchema.index({ status: 1, offerExpiresAt: 1 });
+bookingSchema.index({ "pickupLocation.state": 1 });
+bookingSchema.index({ "pickupLocation.city": 1 });
+bookingSchema.index({ "pickupLocation.state": 1, "pickupLocation.city": 1 });
+bookingSchema.index({ "pickupLocation.pincode": 1 });
 
 module.exports = mongoose.model("Booking", bookingSchema);
