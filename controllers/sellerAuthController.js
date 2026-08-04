@@ -1,66 +1,71 @@
 const Seller = require('../models/Seller');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
-const axios = require('axios');
-const Booking = require("../models/Booking");
-const mongoose = require('mongoose');
+const Booking = require('../models/Booking');
+const { sendOTPWhatsApp } = require('../utils/whatsapp');
+
+const OTP_TTL_MS = 5 * 60 * 1000;      // OTP valid for 5 minutes
+const OTP_RESEND_COOLDOWN_MS = 60 * 1000; // 1 resend per 60s
+const MAX_OTP_ATTEMPTS = 5;
+
+const hashOtp = (otp, businessPhone) =>
+  crypto.createHash('sha256').update(`${otp}:${businessPhone}`).digest('hex');
+
+const generateOtp = () => String(crypto.randomInt(100000, 1000000)); // 6 digits
+
+// businessPhone is stored as a bare 10-digit number (e.g. "9876543210");
+// sendOTPWhatsApp expects country code with no leading + or spaces.
+const sendWhatsAppOtp = async (businessPhone, otp) => {
+  await sendOTPWhatsApp(`91${businessPhone}`, otp, 'decoryy_login_otp');
+};
+
+const signSellerToken = (seller) =>
+  jwt.sign(
+    { id: seller._id, email: seller.email, name: seller.name, type: 'seller', isSeller: true },
+    process.env.JWT_SECRET_SELLER || 'your-secret-key',
+    { expiresIn: '30d' }
+  );
 
 // =========================================================================
-// 1. SELLER REGISTRATION PIPELINE
+// 1. OTP-BASED REGISTRATION PIPELINE
 // =========================================================================
-exports.register = async (req, res) => {
+
+// Step A: collect registration details, create/refresh an unverified seller
+// record, and dispatch an OTP to their WhatsApp number.
+exports.sendOtp = async (req, res) => {
   try {
     const {
-      name, email, password, businessPhone, emergencyPhone, address, 
-      city, state, description, deviceCoordinates
+      name, email, businessPhone, emergencyPhone,
+      state, city, address, pincode, description
     } = req.body;
 
     const normalizedEmail = email && email.toLowerCase().trim();
-    if (!normalizedEmail) {
-      return res.status(400).json({ success: false, message: 'Email is required' });
-    }
+    const normalizedPhone = businessPhone && businessPhone.toString().trim();
 
-    const existingSeller = await Seller.findOne({ email: normalizedEmail });
-    if (existingSeller) {
-      return res.status(400).json({ success: false, message: 'Email already registered' });
-    }
-
-    const requiredFields = ['name', 'email', 'password', 'businessPhone', 'city', 'state'];
-    const missingFields = requiredFields.filter(field => !req.body[field] || req.body[field].toString().trim() === '');
+    const requiredFields = { name, email: normalizedEmail, businessPhone: normalizedPhone, state, city, address, pincode };
+    const missingFields = Object.entries(requiredFields)
+      .filter(([, v]) => !v || v.toString().trim() === '')
+      .map(([k]) => k);
     if (missingFields.length > 0) {
       return res.status(400).json({ success: false, message: `Missing required fields: ${missingFields.join(', ')}` });
     }
 
-    let coordinates = [0, 0];
+    // Look up any existing account with this email or phone.
+    const existing = await Seller.findOne({
+      $or: [{ email: normalizedEmail }, { businessPhone: normalizedPhone }]
+    }).select('+otpLastSentAt phoneVerified email businessPhone');
 
-    if (deviceCoordinates) {
-      try {
-        const parsedCoords = typeof deviceCoordinates === 'string' ? JSON.parse(deviceCoordinates) : deviceCoordinates;
-        if (Array.isArray(parsedCoords) && parsedCoords.length === 2) {
-          coordinates = [parseFloat(parsedCoords[0]), parseFloat(parsedCoords[1])];
-        }
-      } catch (err) {
-        console.error('Coordinates parsing failed:', err.message);
-      }
+    if (existing && existing.phoneVerified) {
+      const conflictField = existing.email === normalizedEmail ? 'Email' : 'Phone number';
+      return res.status(400).json({ success: false, message: `${conflictField} already registered` });
     }
 
-    // Geolocation Fallback Search Mapped to Arrah
-    if (coordinates[0] === 0) {
-      try {
-        const searchCity = city || "Arrah";
-        const searchState = state || "Bihar";
-        const url = `https://nominatim.openstreetmap.org/search?city=${encodeURIComponent(searchCity)}&state=${encodeURIComponent(searchState)}&country=India&format=json&limit=1`;
-        const response = await axios.get(url, { headers: { 'User-Agent': 'DecoryyMerchantApp/1.0' } });
-        
-        if (response.data && response.data.length > 0) {
-          coordinates = [parseFloat(response.data[0].lon), parseFloat(response.data[0].lat)]; 
-        }
-      } catch (geoError) {
-        console.error('Geo fallback error:', geoError.message);
-      }
+    if (existing && existing.otpLastSentAt && Date.now() - existing.otpLastSentAt.getTime() < OTP_RESEND_COOLDOWN_MS) {
+      const waitSecs = Math.ceil((OTP_RESEND_COOLDOWN_MS - (Date.now() - existing.otpLastSentAt.getTime())) / 1000);
+      return res.status(429).json({ success: false, message: `Please wait ${waitSecs}s before requesting another OTP.` });
     }
 
-    let passportPhoto = null;
+    let passportPhoto;
     if (req.file) {
       passportPhoto = {
         public_id: req.file.filename,
@@ -69,39 +74,138 @@ exports.register = async (req, res) => {
       };
     }
 
-    const seller = await Seller.create({
+    const otp = generateOtp();
+    const otpHash = hashOtp(otp, normalizedPhone);
+    const otpExpiresAt = new Date(Date.now() + OTP_TTL_MS);
+
+    const update = {
       name,
       email: normalizedEmail,
-      password,
-      businessPhone,
+      businessPhone: normalizedPhone,
       emergencyPhone,
-      address,
-      city,
       state,
-      location: { type: 'Point', coordinates },
+      city,
+      address,
+      pincode,
       description,
-      passportPhoto
-    });
+      otpHash,
+      otpExpiresAt,
+      otpLastSentAt: new Date(),
+      otpAttempts: 0
+    };
+    if (passportPhoto) update.passportPhoto = passportPhoto;
 
-    const token = jwt.sign(
-      { id: seller._id, email: seller.email, name: seller.name, type: 'seller', isSeller: true },
-      process.env.JWT_SECRET_SELLER || 'your-secret-key',
-      { expiresIn: '30d' }
+    // Upsert: create the pending seller record, or refresh an existing
+    // unverified one (e.g. they abandoned an earlier attempt).
+    await Seller.findOneAndUpdate(
+      { businessPhone: normalizedPhone },
+      { $set: update, $setOnInsert: { phoneVerified: false } },
+      { upsert: true, new: true, runValidators: true }
     );
 
-    res.status(201).json({ success: true, message: 'Seller registered successfully', token, seller });
+    await sendWhatsAppOtp(normalizedPhone, otp);
+
+    res.json({ success: true, message: 'OTP sent to your WhatsApp' });
   } catch (error) {
-    console.error('Seller registration error:', error);
-    res.status(500).json({ success: false, message: 'Error registering seller' });
+    if (error.code === 11000) {
+      return res.status(400).json({ success: false, message: 'Email or phone number already registered' });
+    }
+    console.error('sendOtp error:', error);
+    res.status(500).json({ success: false, message: 'Error sending OTP' });
+  }
+};
+
+// Step B: verify the OTP and, on success, mark the seller verified and log them in.
+exports.verifyOtp = async (req, res) => {
+  try {
+    const { businessPhone, otp } = req.body;
+    if (!businessPhone || !otp) {
+      return res.status(400).json({ success: false, message: 'Phone number and OTP are required' });
+    }
+    const normalizedPhone = businessPhone.toString().trim();
+
+    const seller = await Seller.findOne({ businessPhone: normalizedPhone })
+      .select('+otpHash +otpExpiresAt +otpAttempts');
+
+    if (!seller || !seller.otpHash) {
+      return res.status(400).json({ success: false, message: 'No pending OTP for this number. Please request a new one.' });
+    }
+
+    if (seller.otpAttempts >= MAX_OTP_ATTEMPTS) {
+      return res.status(429).json({ success: false, message: 'Too many incorrect attempts. Please request a new OTP.' });
+    }
+
+    if (!seller.otpExpiresAt || seller.otpExpiresAt.getTime() < Date.now()) {
+      return res.status(400).json({ success: false, message: 'OTP expired. Please request a new one.' });
+    }
+
+    const providedHash = hashOtp(otp.toString().trim(), normalizedPhone);
+    if (providedHash !== seller.otpHash) {
+      seller.otpAttempts += 1;
+      await seller.save();
+      return res.status(401).json({ success: false, message: 'Incorrect OTP' });
+    }
+
+    seller.phoneVerified = true;
+    seller.otpHash = undefined;
+    seller.otpExpiresAt = undefined;
+    seller.otpAttempts = 0;
+    await seller.save();
+
+    const token = signSellerToken(seller);
+    const sellerObj = seller.toObject();
+    delete sellerObj.otpHash;
+    delete sellerObj.otpExpiresAt;
+    delete sellerObj.otpAttempts;
+    delete sellerObj.otpLastSentAt;
+
+    res.json({ success: true, message: 'Registration successful!', token, seller: sellerObj });
+  } catch (error) {
+    console.error('verifyOtp error:', error);
+    res.status(500).json({ success: false, message: 'Error verifying OTP' });
+  }
+};
+
+// Login re-uses the same OTP mechanism for an already-verified seller.
+exports.sendLoginOtp = async (req, res) => {
+  try {
+    const { businessPhone } = req.body;
+    if (!businessPhone) {
+      return res.status(400).json({ success: false, message: 'Phone number is required' });
+    }
+    const normalizedPhone = businessPhone.toString().trim();
+
+    const seller = await Seller.findOne({ businessPhone: normalizedPhone }).select('+otpLastSentAt');
+    if (!seller || !seller.phoneVerified) {
+      return res.status(404).json({ success: false, isNewSeller: true, message: 'No verified account found for this number' });
+    }
+
+    if (seller.otpLastSentAt && Date.now() - seller.otpLastSentAt.getTime() < OTP_RESEND_COOLDOWN_MS) {
+      const waitSecs = Math.ceil((OTP_RESEND_COOLDOWN_MS - (Date.now() - seller.otpLastSentAt.getTime())) / 1000);
+      return res.status(429).json({ success: false, message: `Please wait ${waitSecs}s before requesting another OTP.` });
+    }
+
+    const otp = generateOtp();
+    seller.otpHash = hashOtp(otp, normalizedPhone);
+    seller.otpExpiresAt = new Date(Date.now() + OTP_TTL_MS);
+    seller.otpLastSentAt = new Date();
+    seller.otpAttempts = 0;
+    await seller.save();
+
+    await sendWhatsAppOtp(normalizedPhone, otp);
+    res.json({ success: true, message: 'OTP sent to your WhatsApp' });
+  } catch (error) {
+    console.error('sendLoginOtp error:', error);
+    res.status(500).json({ success: false, message: 'Error sending OTP' });
   }
 };
 
 // =========================================================================
-// 2. CORE AUTHENTICATION PROFILE HANDLERS
+// 2. CORE PROFILE HANDLERS
 // =========================================================================
 exports.getProfile = async (req, res) => {
   try {
-    const seller = await Seller.findById(req.seller._id).select('-password');
+    const seller = await Seller.findById(req.seller._id);
     if (!seller) return res.status(404).json({ success: false, message: 'Seller not found' });
     res.json({ success: true, seller });
   } catch (error) {
@@ -113,20 +217,21 @@ exports.updateProfile = async (req, res) => {
   try {
     const updates = {
       name: req.body.name,
-      businessPhone: req.body.businessPhone,
       emergencyPhone: req.body.emergencyPhone,
       address: req.body.address,
       city: req.body.city,
       state: req.body.state,
+      pincode: req.body.pincode,
       description: req.body.description,
       isOnline: req.body.isOnline
     };
+    Object.keys(updates).forEach((k) => updates[k] === undefined && delete updates[k]);
 
     const seller = await Seller.findByIdAndUpdate(
       req.seller._id,
       { $set: updates },
       { new: true, runValidators: true }
-    ).select('-password');
+    );
 
     res.json({ success: true, seller });
   } catch (error) {
@@ -147,7 +252,7 @@ exports.uploadPassportPhoto = async (req, res) => {
       alt: 'Passport Size Photo'
     };
 
-    const seller = await Seller.findByIdAndUpdate(req.seller.id, { passportPhoto }, { new: true }).select('-password');
+    const seller = await Seller.findByIdAndUpdate(req.seller._id, { passportPhoto }, { new: true });
     res.json({ success: true, message: 'Passport photo uploaded', passportPhoto: seller.passportPhoto });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Upload error' });
@@ -155,75 +260,51 @@ exports.uploadPassportPhoto = async (req, res) => {
 };
 
 // =========================================================================
-// 4. MANAGEMENT & LOGIN PIPELINES
+// 4. BOOKINGS / ALLOCATION
 // =========================================================================
-exports.login = async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    if (!email || !password) return res.status(400).json({ success: false, message: 'All fields required' });
-
-    const seller = await Seller.findOne({ email: email.toLowerCase().trim() });
-    if (!seller || !(await seller.comparePassword(password))) {
-      return res.status(401).json({ success: false, message: 'Invalid credentials' });
-    }
-
-    const token = jwt.sign(
-      { id: seller._id, email: seller.email, name: seller.name, type: 'seller', isSeller: true },
-      process.env.JWT_SECRET_SELLER || 'your-secret-key',
-      { expiresIn: '30d' }
-    );
-
-    return res.json({ success: true, message: 'Login successful', token, seller });
-  } catch (error) {
-    return res.status(500).json({ success: false, message: 'Error logging in' });
-  }
-};
-
 exports.getSellerAssignedBookings = async (req, res) => {
   try {
-    const bookings = await Booking.find({ sellerId: req.seller.id }).populate("userId", "name email phone").sort({ createdAt: -1 });
+    const bookings = await Booking.find({ sellerId: req.seller._id }).populate('userId', 'name email phone').sort({ createdAt: -1 });
     return res.json({ success: true, bookings });
   } catch (error) {
-    return res.status(500).json({ success: false, message: "Failed to fetch bookings." });
+    return res.status(500).json({ success: false, message: 'Failed to fetch bookings.' });
   }
 };
 
 exports.toggleAllocationStatus = async (req, res) => {
   try {
-    const seller = await Seller.findById(req.seller.id);
-    if (!seller) return res.status(404).json({ success: false, message: "Not found" });
+    const seller = await Seller.findById(req.seller._id);
+    if (!seller) return res.status(404).json({ success: false, message: 'Not found' });
     seller.isAllocated = !seller.isAllocated;
     await seller.save();
     return res.status(200).json({ success: true, isAllocated: seller.isAllocated });
   } catch (error) {
-    return res.status(500).json({ success: false, message: "Toggle failure" });
+    return res.status(500).json({ success: false, message: 'Toggle failure' });
   }
 };
 
-// Basic support hooks mapping
+// =========================================================================
+// 5. ADMIN / SUPPORT
+// =========================================================================
 exports.getAllSellers = async (req, res) => {
-  try { const sellers = await Seller.find({}, '-password'); res.json({ success: true, sellers }); } catch (e) { res.status(500).json({ success: false }); }
+  try { const sellers = await Seller.find({}); res.json({ success: true, sellers }); } catch (e) { res.status(500).json({ success: false }); }
 };
 
 exports.getSellerById = async (req, res) => {
-  try { const seller = await Seller.findById(req.params.id).select('-password'); res.json({ success: true, seller }); } catch (e) { res.status(500).json({ success: false }); }
+  try { const seller = await Seller.findById(req.params.id); res.json({ success: true, seller }); } catch (e) { res.status(500).json({ success: false }); }
 };
 
 exports.deleteSeller = async (req, res) => {
   try { await Seller.findByIdAndDelete(req.params.id); res.json({ success: true, message: 'Deleted' }); } catch (e) { res.status(500).json({ success: false }); }
 };
 
-// =========================================================================
-// 5. ADMINISTRATIVE STATE SWITCHES (NEW ADMIN INTERFACE METHODS)
-// =========================================================================
 exports.setApprovalStatus = async (req, res) => {
   try {
     const seller = await Seller.findByIdAndUpdate(
-      req.params.id, 
-      { approved: req.body.approved, verified: req.body.approved }, 
+      req.params.id,
+      { approved: req.body.approved, verified: req.body.approved },
       { new: true }
-    ).select('-password');
-    
+    );
     if (!seller) return res.status(404).json({ success: false, message: 'Seller profile not found' });
     res.json({ success: true, seller });
   } catch (error) {
@@ -234,11 +315,10 @@ exports.setApprovalStatus = async (req, res) => {
 exports.setBlockedStatus = async (req, res) => {
   try {
     const seller = await Seller.findByIdAndUpdate(
-      req.params.id, 
-      { blocked: req.body.blocked }, 
+      req.params.id,
+      { blocked: req.body.blocked },
       { new: true }
-    ).select('-password');
-    
+    );
     if (!seller) return res.status(404).json({ success: false, message: 'Seller profile not found' });
     res.json({ success: true, seller });
   } catch (error) {
@@ -249,12 +329,10 @@ exports.setBlockedStatus = async (req, res) => {
 exports.updateSellerPremiumStatus = async (req, res) => {
   try {
     const seller = await Seller.findByIdAndUpdate(
-      req.params.id, 
-      { isPremium: req.body.isPremium }, 
+      req.params.id,
+      { isPremium: req.body.isPremium },
       { new: true }
-    ).select('-password');
-    console.log("check");
-    
+    );
     if (!seller) return res.status(404).json({ success: false, message: 'Seller profile not found' });
     res.json({ success: true, seller });
   } catch (error) {
@@ -262,69 +340,41 @@ exports.updateSellerPremiumStatus = async (req, res) => {
   }
 };
 
-exports.test = async (req, res) => {
-  res.json({ success: true, message: 'Seller controller operational cluster verified.' });
-};
-// Add this method inside controllers/sellerController.js
 exports.addManualPayment = async (req, res) => {
   try {
     const { paymentAmount } = req.body;
     const sellerId = req.params.id;
 
-    // Validate the input amount
     if (!paymentAmount || isNaN(paymentAmount) || Number(paymentAmount) <= 0) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Please enter a valid payment amount greater than 0.' 
+      return res.status(400).json({
+        success: false,
+        message: 'Please enter a valid payment amount greater than 0.'
       });
     }
 
-    // Increment both the total cash received and the paid bookings count counter
     const seller = await Seller.findByIdAndUpdate(
       sellerId,
-      { 
-        $inc: { 
-          totalPaymentsReceived: Number(paymentAmount),
-          paidBookingsCount: 1 
-        } 
-      },
+      { $inc: { totalPaymentsReceived: Number(paymentAmount), paidBookingsCount: 1 } },
       { new: true }
-    ).select('-password');
+    );
 
     if (!seller) {
       return res.status(404).json({ success: false, message: 'Vendor not found.' });
     }
 
-    // Check if their bypass status is cleared or if they still owe
     const unpaidBookings = (seller.completedBookings || 0) - (seller.paidBookingsCount || 0);
 
-    res.json({ 
-      success: true, 
-      message: `Successfully added ₹${paymentAmount} to ${seller.name}'s account! Unpaid status dropped to ${unpaidBookings < 0 ? 0 : unpaidBookings}.`, 
-      seller 
+    res.json({
+      success: true,
+      message: `Successfully added ₹${paymentAmount} to ${seller.name}'s account! Unpaid status dropped to ${unpaidBookings < 0 ? 0 : unpaidBookings}.`,
+      seller
     });
   } catch (error) {
     console.error('Error adding manual payment:', error);
     res.status(500).json({ success: false, message: 'Server error updating payment metrics.' });
   }
 };
-// =========================================================================
-// 6. MODULE EXPORTS MAP OBJECT
-// =========================================================================
-module.exports = {
-  login: exports.login,
-  register: exports.register,
-  getProfile: exports.getProfile,
-  updateProfile: exports.updateProfile,
-  uploadPassportPhoto: exports.uploadPassportPhoto,
-  getAllSellers: exports.getAllSellers,
-  getSellerById: exports.getSellerById,
-  deleteSeller: exports.deleteSeller,
-  getSellerAssignedBookings: exports.getSellerAssignedBookings,
-  toggleAllocationStatus: exports.toggleAllocationStatus,
-  setApprovalStatus: exports.setApprovalStatus,
-  setBlockedStatus: exports.setBlockedStatus,
-  updateSellerPremiumStatus: exports.updateSellerPremiumStatus,
-  test: exports.test,
-  addManualPayment:exports.addManualPayment
+
+exports.test = async (req, res) => {
+  res.json({ success: true, message: 'Seller controller operational cluster verified.' });
 };

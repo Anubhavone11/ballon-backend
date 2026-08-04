@@ -1,5 +1,4 @@
 const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
 
 const sellerSchema = new mongoose.Schema({
   name: {
@@ -16,16 +15,44 @@ const sellerSchema = new mongoose.Schema({
     trim: true
   },
 
-  password: {
-    type: String,
-    required: [true, 'Password is required'],
-    minlength: 6
-  },
-
+  // ── OTP-based identity — this is what a seller logs in with ─────────────
   businessPhone: {
     type: String,
     required: [true, 'Business phone number is required'],
+    unique: true,
     trim: true
+  },
+
+  // True once the seller has verified businessPhone via WhatsApp OTP.
+  // (Separate from `verified`, which is your admin/KYC document check below.)
+  phoneVerified: {
+    type: Boolean,
+    default: false
+  },
+
+  // ── OTP challenge state (never store the raw OTP) ───────────────────────
+  otpHash: {
+    type: String,
+    default: null,
+    select: false
+  },
+
+  otpExpiresAt: {
+    type: Date,
+    default: null,
+    select: false
+  },
+
+  otpLastSentAt: {
+    type: Date,
+    default: null,
+    select: false
+  },
+
+  otpAttempts: {
+    type: Number,
+    default: 0,
+    select: false
   },
 
   emergencyPhone: {
@@ -34,9 +61,11 @@ const sellerSchema = new mongoose.Schema({
     trim: true
   },
 
-  address: {
+  // ── Location (manual entry, no map / lat-long) ──────────────────────────
+  state: {
     type: String,
-    default: ''
+    required: [true, 'State is required'],
+    trim: true
   },
 
   city: {
@@ -45,22 +74,17 @@ const sellerSchema = new mongoose.Schema({
     trim: true
   },
 
-  state: {
+  address: {
     type: String,
-    required: [true, 'State is required'],
+    required: [true, 'Full address is required'],
     trim: true
   },
 
-  location: {
-    type: {
-      type: String,
-      enum: ['Point'],
-      default: 'Point'
-    },
-    coordinates: {
-      type: [Number],
-      default: [0, 0] // [longitude, latitude]
-    }
+  pincode: {
+    type: String,
+    required: [true, 'Pincode is required'],
+    trim: true,
+    match: [/^[1-9][0-9]{5}$/, 'Enter a valid 6-digit pincode']
   },
 
   description: {
@@ -112,20 +136,21 @@ const sellerSchema = new mongoose.Schema({
   // 📈 Bookings System Execution Counters
   completedBookings: {
     type: Number,
-    default: 0 // ◄ Total orders they completed for customers
+    default: 0
   },
 
   paidBookingsCount: {
     type: Number,
-    default: 0 // ◄ Total orders they actually paid us for via the Admin panel
+    default: 0
   },
 
   // 💰 Ledger Financial metrics
   totalPaymentsReceived: {
     type: Number,
-    default: 0 // ◄ Total money amount they sent us
+    default: 0
   },
 
+  // Admin-side KYC / document verification — distinct from phoneVerified above
   verified: {
     type: Boolean,
     default: false
@@ -146,22 +171,5 @@ const sellerSchema = new mongoose.Schema({
     default: Date.now
   }
 });
-
-sellerSchema.index({ location: '2dsphere' });
-
-sellerSchema.pre('save', async function (next) {
-  if (!this.isModified('password')) return next();
-  try {
-    const salt = await bcrypt.genSalt(10);
-    this.password = await bcrypt.hash(this.password, salt);
-    next();
-  } catch (error) {
-    next(error);
-  }
-});
-
-sellerSchema.methods.comparePassword = async function (candidatePassword) {
-  return bcrypt.compare(candidatePassword, this.password);
-};
 
 module.exports = mongoose.model('Seller', sellerSchema);
