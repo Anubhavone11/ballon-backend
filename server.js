@@ -28,7 +28,7 @@ const videoRoutes = require('./routes/video');
 const adminBookingRoutes = require('./routes/adminBookingRoutes');
 const voiceRoutes = require('./routes/voiceRoutes');
 const chatRoutes = require('./routes/chatRoutes');
- 
+ const bannerRoutes =require('./routes/bannerRoutes');
 // Controllers & Global Services
 const settingsController = require('./controllers/settingsController');
 const { initSocket } = require('./socket/socketSetup'); 
@@ -186,7 +186,7 @@ app.use('/api/voice-gateway', voiceRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/categories', subCategoryRoutes);
 app.use('/api', subCategoryRoutes); 
- 
+app.use('/api/banners', bannerRoutes);
 // Health check
 app.get('/health', (req, res) => {
   res.status(200).json({
