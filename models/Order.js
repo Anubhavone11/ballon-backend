@@ -13,7 +13,8 @@ const orderItemSchema = new mongoose.Schema({
 const addOnSchema = new mongoose.Schema({
   name: { type: String, required: true },
   price: { type: Number, required: true },
-  quantity: { type: Number, default: 1 }
+  quantity: { type: Number, default: 1 },
+  image: { type: String, default: '' } 
 }, { _id: false });
 
 

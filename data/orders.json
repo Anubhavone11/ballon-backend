@@ -789,5 +789,129 @@
     "updatedAt": "2026-06-22T13:29:07.095Z",
     "__v": 0,
     "id": "6a3936869873566963deb88e"
+  },
+  {
+    "customOrderId": "decorationcelebration58",
+    "customerName": "aman",
+    "email": "88@gmail.com",
+    "phone": "919608431634",
+    "address": {
+      "street": "Sector 28",
+      "pincode": "802301",
+      "country": "India"
+    },
+    "scheduledDelivery": null,
+    "items": [
+      {
+        "productId": "6a651968622c47f9cf1b9ddf",
+        "name": "Birthday Decoration",
+        "price": 5499,
+        "quantity": 1,
+        "image": "https://res.cloudinary.com/drztexsbw/image/upload/v1785010535/decoryy/products/product-1785010535387-444686781.webp"
+      }
+    ],
+    "addOns": [
+      {
+        "name": "camera",
+        "price": 450,
+        "quantity": 1
+      }
+    ],
+    "totalAmount": 5949,
+    "paymentMethod": "cod",
+    "orderStatus": "processing",
+    "paymentStatus": "pending",
+    "upfrontAmount": 0,
+    "remainingAmount": 5949,
+    "sellerToken": "",
+    "commission": 0,
+    "_id": "6a74e1ada30bbfe85bc93e12",
+    "createdAt": "2026-08-06T19:34:05.652Z",
+    "updatedAt": "2026-08-06T19:34:05.652Z",
+    "__v": 0,
+    "id": "6a74e1ada30bbfe85bc93e12"
+  },
+  {
+    "customOrderId": "decorationcelebration59",
+    "customerName": "aman",
+    "email": "88@gmail.com",
+    "phone": "919608431634",
+    "address": {
+      "street": "Sector 28",
+      "pincode": "802302",
+      "country": "India"
+    },
+    "scheduledDelivery": null,
+    "items": [
+      {
+        "productId": "696fbe0410766d4c3058ad1e",
+        "name": "Birthday Special",
+        "price": 1599,
+        "quantity": 1,
+        "image": "https://res.cloudinary.com/drztexsbw/image/upload/v1759171901/pawnshop-products/ahxnwfl40j6gmyletrnv.jpg"
+      }
+    ],
+    "addOns": [
+      {
+        "name": "camera",
+        "price": 450,
+        "quantity": 1
+      }
+    ],
+    "totalAmount": 2049,
+    "paymentMethod": "cod",
+    "orderStatus": "processing",
+    "paymentStatus": "pending",
+    "upfrontAmount": 0,
+    "remainingAmount": 2049,
+    "sellerToken": "",
+    "commission": 0,
+    "_id": "6a74ecd4be2b5772316dfc42",
+    "createdAt": "2026-08-06T20:21:40.601Z",
+    "updatedAt": "2026-08-06T20:21:40.601Z",
+    "__v": 0,
+    "id": "6a74ecd4be2b5772316dfc42"
+  },
+  {
+    "customOrderId": "decorationcelebration60",
+    "customerName": "aman",
+    "email": "88@gmail.com",
+    "phone": "919608431634",
+    "address": {
+      "street": "Sector 28",
+      "pincode": "802301",
+      "country": "India"
+    },
+    "scheduledDelivery": "2026-08-14T10:27:00.000Z",
+    "items": [
+      {
+        "productId": "6907c7872b8c21145bcb0118",
+        "name": "Home decoration Setup",
+        "price": 1499,
+        "quantity": 1,
+        "image": "https://res.cloudinary.com/drztexsbw/image/upload/v1762117506/pawnshop-products/tp7uiuwud7llu4mthdwn.png"
+      }
+    ],
+    "addOns": [
+      {
+        "name": "camera",
+        "price": 450,
+        "quantity": 1,
+        "image": "https://res.cloudinary.com/xj4npiub/image/upload/v1786044600/decoryy/addons/addon-1786044599043-558278942.jpg"
+      }
+    ],
+    "totalAmount": 1949,
+    "paymentMethod": "cod",
+    "orderStatus": "processing",
+    "paymentStatus": "pending",
+    "upfrontAmount": 0,
+    "remainingAmount": 1949,
+    "sellerToken": "",
+    "commission": 0,
+    "_id": "6a74edf379cc66bdd1b538d4",
+    "createdAt": "2026-08-06T20:26:27.880Z",
+    "updatedAt": "2026-08-06T20:26:27.880Z",
+    "__v": 0,
+    "id": "6a74edf379cc66bdd1b538d4"
   }
 ]

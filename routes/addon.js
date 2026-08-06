@@ -5,7 +5,7 @@ const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const cloudinary = require('../config/cloudinary');
 const addonController = require('../controllers/addonController');
 const { auth } = require('../middleware/auth');
- 
+
 // Configure Cloudinary storage (replaces local diskStorage)
 const storage = new CloudinaryStorage({
   cloudinary,
@@ -18,7 +18,7 @@ const storage = new CloudinaryStorage({
     }
   },
 });
- 
+
 const upload = multer({
   storage: storage,
   limits: {
@@ -32,11 +32,17 @@ const upload = multer({
     }
   }
 });
- 
+
+// 🚨 IMPORTANT: specific/static routes must come BEFORE '/:id',
+// otherwise Express treats "for-product" as an :id value.
+
+// Public — add-ons applicable to a specific product (checks appliesToAll / products / category)
+router.get('/for-product/:productId', addonController.getAddonsForProduct);
+
 // Public routes (for frontend to fetch active add-ons)
 router.get('/', addonController.getAllAddons);
 router.get('/:id', addonController.getAddonById);
- 
+
 // Image upload endpoint (protected)
 router.post('/upload', auth, upload.single('image'), (req, res) => {
   try {
@@ -46,10 +52,10 @@ router.post('/upload', auth, upload.single('image'), (req, res) => {
         message: 'No image file provided'
       });
     }
- 
+
     // multer-storage-cloudinary already gives us the full hosted CDN URL on req.file.path
     const imageUrl = req.file.path;
- 
+
     res.status(200).json({
       success: true,
       imageUrl: imageUrl
@@ -63,11 +69,11 @@ router.post('/upload', auth, upload.single('image'), (req, res) => {
     });
   }
 });
- 
+
 // Admin routes (protected)
 router.post('/', auth, addonController.createAddon);
 router.put('/:id', auth, addonController.updateAddon);
 router.delete('/:id', auth, addonController.deleteAddon);
 router.patch('/:id/toggle-status', auth, addonController.toggleAddonStatus);
- 
+
 module.exports = router;

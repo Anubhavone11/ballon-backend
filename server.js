@@ -33,6 +33,7 @@ const chatRoutes = require('./routes/chatRoutes');
 const settingsController = require('./controllers/settingsController');
 const { initSocket } = require('./socket/socketSetup'); 
 const { startMatchmakingSweep } = require('./controllers/Matchmakingsweep');
+const addonRoutes =require("./routes/addon");
 // const { initWhatsApp } = require('./controllers/bookingController'); // ◄ WhatsApp init
  
 const app = express();
@@ -187,6 +188,7 @@ app.use('/api/chat', chatRoutes);
 app.use('/api/categories', subCategoryRoutes);
 app.use('/api', subCategoryRoutes); 
 app.use('/api/banners', bannerRoutes);
+app.use("/api/addons", require("./routes/addon"));
 // Health check
 app.get('/health', (req, res) => {
   res.status(200).json({
