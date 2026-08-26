@@ -242,7 +242,7 @@ const sendVendorAssignedToCustomer = async (booking, seller) => {
         to: toPhone,
         type: "template",
         template: {
-          name: "decoryy_customer_vendor_assigned",
+          name: "decoryy_customer_vendor",
           language: {
             code: "en"
           },

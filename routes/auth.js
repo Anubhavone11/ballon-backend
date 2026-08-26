@@ -35,7 +35,7 @@ async function sendOTPWhatsApp(phone, otp) {
     to: phone,
     type: 'template',
     template: {
-      name: 'decoryy_login_otp',
+      name: 'decoryy_login',
       language: { code: 'en' },
       components: [
         {
