@@ -13,7 +13,7 @@ const WHATSAPP_PHONE_NUMBER_ID = process.env.WA_PHONE_NUMBER_ID;
  * `templateName` lets you use a different approved template for sellers vs
  * customers if you want distinct copy — defaults to the same one customers use.
  */
-async function sendOTPWhatsApp(phone, otp, templateName = 'decoryy_login_otp') {
+async function sendOTPWhatsApp(phone, otp, templateName = 'decoryy_login') {
   if (!WHATSAPP_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
     throw new Error('WhatsApp API is not configured (missing WA_ACCESS_TOKEN / WA_PHONE_NUMBER_ID)');
   }

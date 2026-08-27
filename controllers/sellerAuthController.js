@@ -16,7 +16,7 @@ const generateOtp = () => String(crypto.randomInt(100000, 1000000)); // 6 digits
 // businessPhone is stored as a bare 10-digit number (e.g. "9876543210");
 // sendOTPWhatsApp expects country code with no leading + or spaces.
 const sendWhatsAppOtp = async (businessPhone, otp) => {
-  await sendOTPWhatsApp(`91${businessPhone}`, otp, 'decoryy_login_otp');
+  await sendOTPWhatsApp(`91${businessPhone}`, otp, 'decoryy_login');
 };
 
 const signSellerToken = (seller) =>
