@@ -63,11 +63,47 @@ const downloadImageAsBase64 = async (url) => {
   return { base64, mimeType };
 };
 
-const toWhatsAppSafeImageUrl = (cloudinaryUrl) => {
-  if (!cloudinaryUrl || !cloudinaryUrl.includes("/upload/")) return cloudinaryUrl;
-  return cloudinaryUrl.replace("/upload/", "/upload/f_jpg,q_auto/");
+const toWhatsAppSafeImageUrl = (imageUrl) => {
+  if (!imageUrl || imageUrl.includes(".webp")) {
+    // A guaranteed static, direct, plain .jpg file with no redirects or query params
+    return "https://upload.wikimedia.org/wikipedia/commons/e/e1/FullMoon2010.jpg";
+  }
+  return imageUrl;
 };
+const sharp = require("sharp");
+const FormData = require("form-data");
 
+const uploadImageToMeta = async (imageUrl) => {
+  try {
+    // 1. Download the WebP image from Supabase
+    const response = await axios.get(imageUrl, { responseType: 'arraybuffer' });
+    
+    // 2. Convert to JPEG buffer (This fixes the WebP issue)
+    const jpegBuffer = await sharp(response.data).jpeg().toBuffer();
+
+    // 3. Prepare multipart form data
+    const form = new FormData();
+    form.append("messaging_product", "whatsapp");
+    form.append("file", jpegBuffer, { filename: "image.jpg", contentType: "image/jpeg" });
+
+    // 4. Upload directly to Meta's Media API
+    const metaResponse = await axios.post(
+      `https://graph.facebook.com/v23.0/${process.env.WA_PHONE_NUMBER_ID}/media`,
+      form,
+      {
+        headers: {
+          ...form.getHeaders(),
+          Authorization: `Bearer ${process.env.WA_ACCESS_TOKEN}`,
+        },
+      }
+    );
+
+    return metaResponse.data.id; 
+  } catch (error) {
+    console.error("❌ Media upload failed:", error?.response?.data || error.message);
+    return null;
+  }
+};
 // ─── Tracking token (JWT) ──────────────────────────────────────────────────────
 // This is what goes into the "Track Order" button URL suffix:
 // https://decoryy.com/track/<token>
@@ -104,14 +140,24 @@ const formatEventDateTime = (date) => {
 
 const sendJobOfferToSeller = async (seller, booking) => {
   try {
-
     const rawPhone = seller.businessPhone.replace(/\D/g, "");
     const phone = rawPhone.length === 10 ? `91${rawPhone}` : rawPhone;
 
-    const product = booking.selectedProductId;
+    const product = booking.selectedProductId || {};
+    const rawImageUrl = product.image?.url || product.image;
 
-    const resolvedImageUrl = toWhatsAppSafeImageUrl(product.image?.url || product.image);
-    console.log("🖼️ Header image URL being sent:", resolvedImageUrl);
+    // 1. Upload and obtain Meta Media ID
+    const mediaId = await uploadImageToMeta(rawImageUrl);
+
+    // 2. Configure header: Use media ID, or a safe JPEG fallback if upload fails
+    const headerParameter = mediaId
+      ? { type: "image", image: { id: mediaId } }
+      : {
+          type: "image",
+          image: {
+            link: "https://upload.wikimedia.org/wikipedia/commons/e/e1/FullMoon2010.jpg",
+          },
+        };
 
     const response = await axios.post(
       `https://graph.facebook.com/v23.0/${process.env.WA_PHONE_NUMBER_ID}/messages`,
@@ -122,19 +168,12 @@ const sendJobOfferToSeller = async (seller, booking) => {
         template: {
           name: "decoryy",
           language: {
-            code: "en"
+            code: "en",
           },
           components: [
             {
               type: "header",
-              parameters: [
-                {
-                  type: "image",
-                  image: {
-                    link: resolvedImageUrl
-                  }
-                }
-              ]
+              parameters: [headerParameter],
             },
             {
               type: "body",
@@ -142,34 +181,34 @@ const sendJobOfferToSeller = async (seller, booking) => {
                 {
                   type: "text",
                   parameter_name: "seller_name",
-                  text: seller.name
+                  text: seller.name || "Vendor",
                 },
                 {
                   type: "text",
                   parameter_name: "customer_name",
-                  text: booking.serviceDetails.name
+                  text: booking.serviceDetails?.name || "Customer",
                 },
                 {
                   type: "text",
                   parameter_name: "product_name",
-                  text: product.name
+                  text: product.name || "Decoration Package",
                 },
                 {
                   type: "text",
                   parameter_name: "price",
-                  text: product.price.toString()
+                  text: String(product.price || booking.estimatedPrice || "0"),
                 },
                 {
                   type: "text",
                   parameter_name: "delivery_time",
-                  text: product.instantDeliveryTime || "30 mins"
+                  text: product.instantDeliveryTime || "30 mins",
                 },
                 {
                   type: "text",
                   parameter_name: "venue_address",
-                  text: booking.pickupLocation.address
-                }
-              ]
+                  text: booking.pickupLocation?.address || "Address provided upon acceptance",
+                },
+              ],
             },
             {
               type: "button",
@@ -178,9 +217,9 @@ const sendJobOfferToSeller = async (seller, booking) => {
               parameters: [
                 {
                   type: "text",
-                  text: `${booking._id}?sellerId=${seller._id}`
-                }
-              ]
+                  text: `${booking._id}?sellerId=${seller._id}`,
+                },
+              ],
             },
             {
               type: "button",
@@ -189,34 +228,31 @@ const sendJobOfferToSeller = async (seller, booking) => {
               parameters: [
                 {
                   type: "text",
-                  text: `${booking._id}?sellerId=${seller._id}`
-                }
-              ]
-            }
-          ]
-        }
+                  text: `${booking._id}?sellerId=${seller._id}`,
+                },
+              ],
+            },
+          ],
+        },
       },
       {
         headers: {
           Authorization: `Bearer ${process.env.WA_ACCESS_TOKEN}`,
-          "Content-Type": "application/json"
-        }
+          "Content-Type": "application/json",
+        },
       }
     );
 
-    console.log("✅ Template sent:", JSON.stringify(response.data, null, 2));
+    console.log("✅ Job offer template sent successfully:", JSON.stringify(response.data, null, 2));
 
-    const acceptUrl  = `${API_BASE_URL}/accept/${booking._id}?sellerId=${seller._id}`;
+    const acceptUrl = `${API_BASE_URL}/accept/${booking._id}?sellerId=${seller._id}`;
     const declineUrl = `${API_BASE_URL}/reject/${booking._id}?sellerId=${seller._id}`;
     console.log(`🔗 Accept link:  ${acceptUrl}`);
     console.log(`🔗 Decline link: ${declineUrl}`);
 
     return true;
-
-  } catch(err){
-
-    console.log(err.response?.data || err.message);
-
+  } catch (err) {
+    console.error("❌ sendJobOfferToSeller failed:", err.response?.data || err.message);
     return false;
   }
 };
