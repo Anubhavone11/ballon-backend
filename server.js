@@ -56,7 +56,8 @@ const allowedOrigins = [
   'https://www.decoryy.com',
   'https://ballon-frontend.vercel.app',
   'https://ballon-admin-beta.vercel.app',
-  'https://admin.decoryy.com'
+  'https://admin.decoryy.com',
+  'https://ballon-frontend-psi.vercel.app'
 ];
  
 app.use(cors({
