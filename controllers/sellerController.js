@@ -82,31 +82,70 @@ exports.getSellers = async (req, res) => {
 };
 exports.checkPincode = async (req, res) => {
   try {
-    const { pincode } = req.query;
+    const { pincode, city } = req.query;
 
-    if (!pincode) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "Pincode is required." 
+    const cleanPincode = pincode ? pincode.toString().trim() : null;
+    const cleanCity = city ? city.toString().trim() : null;
+
+    if (!cleanPincode && !cleanCity) {
+      return res.status(400).json({
+        success: false,
+        message: "Pincode or city is required.",
       });
     }
 
-    const count = await Seller.countDocuments({
-      pincode: pincode.toString(),
+    if (cleanPincode && !/^\d{6}$/.test(cleanPincode)) {
+      return res.status(400).json({
+        success: false,
+        message: "Please enter a valid 6-digit pincode.",
+      });
+    }
+
+    const baseFilter = {
       approved: true,
       blocked: false,
-    });
+    };
+
+    let count = 0;
+    let matchType = null; // "pincode" | "city" | null
+
+    // 1. Try exact pincode match first (most specific)
+    if (cleanPincode) {
+      count = await Seller.countDocuments({
+        ...baseFilter,
+        pincode: cleanPincode,
+      });
+
+      if (count > 0) {
+        matchType = "pincode";
+      }
+    }
+
+    // 2. Fall back to city match if no pincode match (or no pincode given at all)
+    if (count === 0 && cleanCity) {
+      count = await Seller.countDocuments({
+        ...baseFilter,
+        city: { $regex: `^${cleanCity}$`, $options: "i" },
+      });
+
+      if (count > 0) {
+        matchType = "city";
+      }
+    }
 
     return res.json({
       success: true,
       available: count > 0,
       decoratorCount: count,
+      matchType, // lets the frontend say "near you" vs "in your city"
+      pincode: cleanPincode || null,
+      city: cleanCity || null,
     });
   } catch (err) {
     console.error("checkPincode error:", err);
-    return res.status(500).json({ 
-      success: false, 
-      message: "Could not check pincode." 
+    return res.status(500).json({
+      success: false,
+      message: "Could not check pincode.",
     });
   }
 };
