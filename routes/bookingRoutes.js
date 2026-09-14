@@ -15,6 +15,15 @@ const sellerAuth = require("../middleware/sellerAuth");  // For venue owners/par
 // "/:bookingId" with bookingId="accept" instead of hitting acceptBooking).
 
 // --- CUSTOMER BOOKING ENDPOINTS (Protected by userAuth) ---
+const sellerController = require("../controllers/sellerController");
+ 
+// TODO: plug in your real admin-auth middleware before shipping this.
+// This route returns seller PII (email, phone, address) and must not
+// stay public. Example:
+//   const adminAuth = require("../middleware/adminAuth");
+//   router.get("/", adminAuth, sellerController.getSellers);
+ 
+router.get("/check-pincode", sellerController.checkPincode);
 router.post(
   "/instant",
   userAuth,
