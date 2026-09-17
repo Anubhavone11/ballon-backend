@@ -121,15 +121,17 @@ const createOrder = async (req, res) => {
         }
         
         // Validate that the delivery date is at least 5 days in the future
-        const minDeliveryDate = new Date();
-        minDeliveryDate.setDate(minDeliveryDate.getDate() + 5);
-        
-        if (deliveryDate < minDeliveryDate) {
-          return res.status(400).json({ 
-            success: false, 
-            message: 'Scheduled delivery must be at least 5 days in the future.' 
-          });
-        }
+      // Validate that the delivery date is at least tomorrow
+const minDeliveryDate = new Date();
+minDeliveryDate.setHours(0, 0, 0, 0);
+minDeliveryDate.setDate(minDeliveryDate.getDate() + 1);
+
+if (deliveryDate < minDeliveryDate) {
+  return res.status(400).json({ 
+    success: false, 
+    message: 'Scheduled delivery must be at least 1 day in the future.' 
+  });
+}
         
         // Validate that the delivery time is within business hours (9 AM to 9 PM)
         const deliveryTime = deliveryDate.getHours();
