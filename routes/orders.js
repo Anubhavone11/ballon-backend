@@ -4,7 +4,7 @@ const Order = require("../models/Order");
 const router = express.Router();
 const fs = require('fs');
 const path = require('path');
-const { createOrder, getOrdersByEmail, getOrderById, sendOrderStatusUpdateEmail } = require('../controllers/orderController');
+const { createOrder, getOrdersByEmail, getOrderById, sendOrderStatusUpdateEmail, deleteOrder } = require('../controllers/orderController');
 const { authenticateToken, isAdmin } = require('../middleware/auth');
 
 const ordersFilePath = path.join(__dirname, '../data/orders.json');
@@ -36,7 +36,7 @@ const writeOrders = (orders) => {
     throw new Error('Failed to save order to JSON file');
   }
 };
-
+router.delete('/:id', authenticateToken, isAdmin, deleteOrder);
 // Admin: Get all orders from MongoDB (not orders.json) - PROTECTED
 router.get('/json', authenticateToken, isAdmin, async (req, res) => {
   try {

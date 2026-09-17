@@ -1015,5 +1015,39 @@
     "updatedAt": "2026-09-17T18:41:52.952Z",
     "__v": 0,
     "id": "6aac3470c3c8a07696c9d819"
+  },
+  {
+    "customOrderId": "decorationcelebration81",
+    "customerName": "aman",
+    "email": "88@gmail.com",
+    "phone": "919608431634",
+    "address": {
+      "street": "hjjh",
+      "pincode": "802301",
+      "country": "India"
+    },
+    "scheduledDelivery": "2026-09-19T04:32:00.000Z",
+    "items": [
+      {
+        "productId": "6a777dcc87929056e85542fd",
+        "name": "Adult Birthday",
+        "price": 2499,
+        "quantity": 1,
+        "image": "https://res.cloudinary.com/xj4npiub/image/upload/v1786215883/decoryy/products/product-1786215882710-247703077.webp"
+      }
+    ],
+    "addOns": [],
+    "totalAmount": 2499,
+    "paymentMethod": "cod",
+    "orderStatus": "processing",
+    "paymentStatus": "pending",
+    "upfrontAmount": 0,
+    "remainingAmount": 2499,
+    "commission": 0,
+    "_id": "6aac407dabd37d31f51deae5",
+    "createdAt": "2026-09-17T19:33:17.050Z",
+    "updatedAt": "2026-09-17T19:33:17.050Z",
+    "__v": 0,
+    "id": "6aac407dabd37d31f51deae5"
   }
 ]

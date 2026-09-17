@@ -38,7 +38,42 @@ const transporter = nodemailer.createTransport({
     pass: process.env.EMAIL_PASS,
   },
 });
+// Delete an order
+const deleteOrder = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deletedOrder = await Order.findByIdAndDelete(id);
 
+    if (!deletedOrder) {
+      return res.status(404).json({ success: false, message: 'Order not found.' });
+    }
+
+    // Keep orders.json backup in sync
+    try {
+      const data = await fs.readFile(ordersJsonPath, 'utf8');
+      let orders = JSON.parse(data);
+      if (Array.isArray(orders)) {
+        orders = orders.filter(o => o._id?.toString() !== id);
+        await fs.writeFile(ordersJsonPath, JSON.stringify(orders, null, 2));
+      }
+    } catch (jsonErr) {
+      console.error('Failed to update orders.json after delete:', jsonErr);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Order deleted successfully.',
+      order: deletedOrder
+    });
+  } catch (error) {
+    console.error('Error deleting order:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete order.',
+      error: error.message
+    });
+  }
+};
 // Create a new order
 const createOrder = async (req, res) => {
   try {
@@ -499,6 +534,7 @@ module.exports = {
   createOrder,
   getOrdersByEmail,
   getOrderById,
+  deleteOrder,
   sendOrderStatusUpdateEmail,
   formatScheduledDelivery,
 };
