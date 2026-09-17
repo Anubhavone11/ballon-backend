@@ -981,5 +981,39 @@
     "updatedAt": "2026-09-17T15:29:24.333Z",
     "__v": 0,
     "id": "6aac07543f036af39350d50d"
+  },
+  {
+    "customOrderId": "decorationcelebration75",
+    "customerName": "aman",
+    "email": "88@gmail.com",
+    "phone": "919608431634",
+    "address": {
+      "street": "Sector 28",
+      "pincode": "802301",
+      "country": "India"
+    },
+    "scheduledDelivery": "2026-09-19T04:41:00.000Z",
+    "items": [
+      {
+        "productId": "68dc3c5effaf1ee188238117",
+        "name": "Office decoration",
+        "price": 999,
+        "quantity": 1,
+        "image": "https://zoafyximwitrqrrkufad.supabase.co/storage/v1/object/public/drztexsbw/products/68dc3c5effaf1ee188238117/gallery-0.webp"
+      }
+    ],
+    "addOns": [],
+    "totalAmount": 999,
+    "paymentMethod": "cod",
+    "orderStatus": "processing",
+    "paymentStatus": "pending",
+    "upfrontAmount": 0,
+    "remainingAmount": 999,
+    "commission": 0,
+    "_id": "6aac3470c3c8a07696c9d819",
+    "createdAt": "2026-09-17T18:41:52.952Z",
+    "updatedAt": "2026-09-17T18:41:52.952Z",
+    "__v": 0,
+    "id": "6aac3470c3c8a07696c9d819"
   }
 ]
