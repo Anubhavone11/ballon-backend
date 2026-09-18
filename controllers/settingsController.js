@@ -8,9 +8,7 @@ if (!Settings) {
 // Get all settings
 const getAllSettings = async (req, res) => {
   try {
-    console.log('Fetching all settings...');
     const settings = await Settings.find().sort({ key: 1 });
-    console.log('Settings found:', settings.length);
     res.status(200).json({ success: true, settings });
   } catch (error) {
     console.error('Error fetching settings:', error);
@@ -23,11 +21,11 @@ const getSettingByKey = async (req, res) => {
   try {
     const { key } = req.params;
     const setting = await Settings.findOne({ key });
-    
+
     if (!setting) {
       return res.status(404).json({ success: false, message: 'Setting not found' });
     }
-    
+
     res.status(200).json({ success: true, setting });
   } catch (error) {
     console.error('Error fetching setting:', error);
@@ -39,41 +37,39 @@ const getSettingByKey = async (req, res) => {
 const upsertSetting = async (req, res) => {
   try {
     const { key, value, description } = req.body;
-    
-    console.log('Upserting setting:', { key, value, description });
-    
+
     if (!key || value === undefined) {
       return res.status(400).json({ success: false, message: 'Key and value are required' });
     }
-    
+
     // Convert value to number for numeric settings
     let processedValue = value;
     if (key === 'cod_upfront_amount') {
       // Allow 0 as a valid value
       processedValue = value === '' || value === null || value === undefined ? 39 : Number(value);
     }
-    
-    // Use findOneAndUpdate with upsert to create or update
+    if (key === 'default_service_fee') {
+      processedValue = value === '' || value === null ? 0 : Math.max(0, Number(value) || 0);
+    }
+
     const setting = await Settings.findOneAndUpdate(
       { key },
-      { 
-        value: processedValue, 
+      {
+        value: processedValue,
         description: description || '',
         updatedAt: new Date()
       },
-      { 
-        new: true, 
+      {
+        new: true,
         upsert: true,
-        runValidators: true 
+        runValidators: true
       }
     );
-    
-    console.log('Setting saved:', setting);
-    
-    res.status(200).json({ 
-      success: true, 
+
+    res.status(200).json({
+      success: true,
       message: 'Setting saved successfully',
-      setting 
+      setting
     });
   } catch (error) {
     console.error('Error saving setting:', error);
@@ -86,15 +82,15 @@ const deleteSetting = async (req, res) => {
   try {
     const { key } = req.params;
     const setting = await Settings.findOneAndDelete({ key });
-    
+
     if (!setting) {
       return res.status(404).json({ success: false, message: 'Setting not found' });
     }
-    
-    res.status(200).json({ 
-      success: true, 
+
+    res.status(200).json({
+      success: true,
       message: 'Setting deleted successfully',
-      setting 
+      setting
     });
   } catch (error) {
     console.error('Error deleting setting:', error);
@@ -114,10 +110,10 @@ const initializeDefaultSettings = async () => {
       {
         key: 'default_service_fee',
         value: 0,
-        description: 'Default service fee for pin codes not in any specific range (in rupees)'
+        description: 'Default service fee for pin codes that do not have a specific fee (in rupees)'
       }
     ];
-    
+
     for (const setting of defaultSettings) {
       const existingSetting = await Settings.findOne({ key: setting.key });
       if (!existingSetting) {
@@ -135,20 +131,19 @@ const getCodUpfrontAmount = async (req, res) => {
   try {
     const setting = await Settings.findOne({ key: 'cod_upfront_amount' });
     let amount = 39; // Default to 39 if not found
-    
+
     if (setting) {
-      // Ensure the value is a number and allow 0 as valid
       amount = (setting.value === '' || setting.value === null || setting.value === undefined) ? 39 : Number(setting.value);
     }
-    
-    res.status(200).json({ 
-      success: true, 
-      amount: amount 
+
+    res.status(200).json({
+      success: true,
+      amount: amount
     });
   } catch (error) {
     console.error('Error fetching COD upfront amount:', error);
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       message: 'Failed to fetch COD upfront amount',
       amount: 39 // Fallback to default
     });
@@ -162,4 +157,4 @@ module.exports = {
   deleteSetting,
   initializeDefaultSettings,
   getCodUpfrontAmount
-}; 
+};

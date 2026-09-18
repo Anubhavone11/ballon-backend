@@ -1,70 +1,70 @@
 const PinCodeServiceFee = require('../models/PinCodeServiceFee');
+const Settings = require('../models/Settings');
 
-// Get all pin code service fees
+const PIN_REGEX = /^\d{6}$/;
+
+// Get all ACTIVE pin code service fees (public)
 const getAllPinCodeServiceFees = async (req, res) => {
   try {
     const pinCodeFees = await PinCodeServiceFee.find({ isActive: true })
-      .sort({ startPinCode: 1 });
-    
-    res.status(200).json({ 
-      success: true, 
-      pinCodeFees 
+      .sort({ pinCode: 1 });
+
+    res.status(200).json({
+      success: true,
+      pinCodeFees
     });
   } catch (error) {
     console.error('Error fetching pin code service fees:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to fetch pin code service fees', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch pin code service fees',
+      error: error.message
     });
   }
 };
 
-// Get pin code service fee by pin code
+// Get service fee for a single pin code (exact match, falls back to default fee)
 const getPinCodeServiceFee = async (req, res) => {
   try {
     const { pinCode } = req.params;
-    
-    if (!pinCode || !/^\d{6}$/.test(pinCode)) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Valid 6-digit pin code is required' 
+
+    if (!pinCode || !PIN_REGEX.test(pinCode)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid 6-digit pin code is required'
       });
     }
 
-    const pinCodeInt = parseInt(pinCode);
-    
-    // Find the pin code range that contains this pin code
     const pinCodeFee = await PinCodeServiceFee.findOne({
       isActive: true,
-      startPinCode: { $lte: pinCode },
-      endPinCode: { $gte: pinCode }
+      pinCode
     });
 
-    if (pinCodeFee) {
-      res.status(200).json({ 
-        success: true, 
+    // Pin code has its own fee -> use it
+    if (pinCodeFee && pinCodeFee.serviceFee !== null && pinCodeFee.serviceFee !== undefined) {
+      return res.status(200).json({
+        success: true,
         pinCodeFee,
         serviceFee: pinCodeFee.serviceFee
       });
-    } else {
-      // Return default service fee if no specific range found
-      const defaultSetting = await require('../models/Settings').findOne({ key: 'default_service_fee' });
-      const defaultFee = defaultSetting ? Number(defaultSetting.value) : 0;
-      
-      res.status(200).json({ 
-        success: true, 
-        pinCodeFee: null,
-        serviceFee: defaultFee,
-        isDefault: true
-      });
     }
+
+    // Pin code not found, or its fee is empty -> use default service fee
+    const defaultSetting = await Settings.findOne({ key: 'default_service_fee' });
+    const defaultFee = defaultSetting ? Number(defaultSetting.value) || 0 : 0;
+
+    res.status(200).json({
+      success: true,
+      pinCodeFee: pinCodeFee || null,
+      serviceFee: defaultFee,
+      isDefault: true
+    });
   } catch (error) {
     console.error('Error fetching pin code service fee:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to fetch pin code service fee', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch pin code service fee',
+      error: error.message
     });
   }
 };
@@ -72,53 +72,65 @@ const getPinCodeServiceFee = async (req, res) => {
 // Create new pin code service fee
 const createPinCodeServiceFee = async (req, res) => {
   try {
-    const { startPinCode, endPinCode, serviceFee, description } = req.body;
-    
-    if (!startPinCode || !endPinCode || serviceFee === undefined) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Start pin code, end pin code, and service fee are required' 
+    const { pinCode, serviceFee, description } = req.body;
+
+    if (!pinCode) {
+      return res.status(400).json({
+        success: false,
+        message: 'Pin code is required'
       });
     }
 
-    // Check for overlapping ranges
-    const overlappingRange = await PinCodeServiceFee.findOne({
-      isActive: true,
-      $or: [
-        {
-          startPinCode: { $lte: endPinCode },
-          endPinCode: { $gte: startPinCode }
-        }
-      ]
-    });
+    if (!PIN_REGEX.test(String(pinCode))) {
+      return res.status(400).json({
+        success: false,
+        message: 'Pin code must be exactly 6 digits'
+      });
+    }
 
-    if (overlappingRange) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Pin code range overlaps with existing range' 
+    // Fee is optional: empty/null means "use the default service fee"
+    const hasFee = serviceFee !== undefined && serviceFee !== null && serviceFee !== '';
+    if (hasFee && (isNaN(Number(serviceFee)) || Number(serviceFee) < 0)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Service fee must be a non-negative number'
+      });
+    }
+
+    // Only one fee per pin code
+    const existing = await PinCodeServiceFee.findOne({ pinCode: String(pinCode) });
+    if (existing) {
+      return res.status(400).json({
+        success: false,
+        message: 'This pin code already has a service fee'
       });
     }
 
     const pinCodeFee = new PinCodeServiceFee({
-      startPinCode,
-      endPinCode,
-      serviceFee: Number(serviceFee),
+      pinCode: String(pinCode),
+      serviceFee: hasFee ? Number(serviceFee) : null,
       description: description || ''
     });
 
     await pinCodeFee.save();
 
-    res.status(201).json({ 
-      success: true, 
+    res.status(201).json({
+      success: true,
       message: 'Pin code service fee created successfully',
-      pinCodeFee 
+      pinCodeFee
     });
   } catch (error) {
     console.error('Error creating pin code service fee:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to create pin code service fee', 
-      error: error.message 
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message: 'This pin code already has a service fee'
+      });
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create pin code service fee',
+      error: error.message
     });
   }
 };
@@ -127,64 +139,75 @@ const createPinCodeServiceFee = async (req, res) => {
 const updatePinCodeServiceFee = async (req, res) => {
   try {
     const { id } = req.params;
-    const { startPinCode, endPinCode, serviceFee, description, isActive } = req.body;
-    
+    const { pinCode, serviceFee, description, isActive } = req.body;
+
     const pinCodeFee = await PinCodeServiceFee.findById(id);
     if (!pinCodeFee) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Pin code service fee not found' 
+      return res.status(404).json({
+        success: false,
+        message: 'Pin code service fee not found'
       });
     }
 
-    // Check for overlapping ranges (excluding current record)
-    if (startPinCode || endPinCode) {
-      const start = startPinCode || pinCodeFee.startPinCode;
-      const end = endPinCode || pinCodeFee.endPinCode;
-      
-      const overlappingRange = await PinCodeServiceFee.findOne({
+    if (pinCode !== undefined) {
+      if (!PIN_REGEX.test(String(pinCode))) {
+        return res.status(400).json({
+          success: false,
+          message: 'Pin code must be exactly 6 digits'
+        });
+      }
+
+      // Check duplicate (excluding current record)
+      const duplicate = await PinCodeServiceFee.findOne({
         _id: { $ne: id },
-        isActive: true,
-        $or: [
-          {
-            startPinCode: { $lte: end },
-            endPinCode: { $gte: start }
-          }
-        ]
+        pinCode: String(pinCode)
       });
 
-      if (overlappingRange) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Pin code range overlaps with existing range' 
+      if (duplicate) {
+        return res.status(400).json({
+          success: false,
+          message: 'This pin code already has a service fee'
         });
       }
     }
 
+    const feeIsEmpty = serviceFee === null || serviceFee === '';
+    if (serviceFee !== undefined && !feeIsEmpty && (isNaN(Number(serviceFee)) || Number(serviceFee) < 0)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Service fee must be a non-negative number'
+      });
+    }
+
     const updateData = {};
-    if (startPinCode !== undefined) updateData.startPinCode = startPinCode;
-    if (endPinCode !== undefined) updateData.endPinCode = endPinCode;
-    if (serviceFee !== undefined) updateData.serviceFee = Number(serviceFee);
+    if (pinCode !== undefined) updateData.pinCode = String(pinCode);
+    if (serviceFee !== undefined) updateData.serviceFee = feeIsEmpty ? null : Number(serviceFee);
     if (description !== undefined) updateData.description = description;
     if (isActive !== undefined) updateData.isActive = isActive;
 
     const updatedPinCodeFee = await PinCodeServiceFee.findByIdAndUpdate(
-      id, 
-      updateData, 
+      id,
+      updateData,
       { new: true, runValidators: true }
     );
 
-    res.status(200).json({ 
-      success: true, 
+    res.status(200).json({
+      success: true,
       message: 'Pin code service fee updated successfully',
-      pinCodeFee: updatedPinCodeFee 
+      pinCodeFee: updatedPinCodeFee
     });
   } catch (error) {
     console.error('Error updating pin code service fee:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to update pin code service fee', 
-      error: error.message 
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message: 'This pin code already has a service fee'
+      });
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update pin code service fee',
+      error: error.message
     });
   }
 };
@@ -193,46 +216,46 @@ const updatePinCodeServiceFee = async (req, res) => {
 const deletePinCodeServiceFee = async (req, res) => {
   try {
     const { id } = req.params;
-    
+
     const pinCodeFee = await PinCodeServiceFee.findByIdAndDelete(id);
     if (!pinCodeFee) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Pin code service fee not found' 
+      return res.status(404).json({
+        success: false,
+        message: 'Pin code service fee not found'
       });
     }
 
-    res.status(200).json({ 
-      success: true, 
+    res.status(200).json({
+      success: true,
       message: 'Pin code service fee deleted successfully',
-      pinCodeFee 
+      pinCodeFee
     });
   } catch (error) {
     console.error('Error deleting pin code service fee:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to delete pin code service fee', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete pin code service fee',
+      error: error.message
     });
   }
 };
 
-// Get all pin code service fees (admin)
+// Get all pin code service fees, including inactive (admin)
 const getAllPinCodeServiceFeesAdmin = async (req, res) => {
   try {
     const pinCodeFees = await PinCodeServiceFee.find()
-      .sort({ startPinCode: 1 });
-    
-    res.status(200).json({ 
-      success: true, 
-      pinCodeFees 
+      .sort({ pinCode: 1 });
+
+    res.status(200).json({
+      success: true,
+      pinCodeFees
     });
   } catch (error) {
     console.error('Error fetching pin code service fees:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to fetch pin code service fees', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch pin code service fees',
+      error: error.message
     });
   }
 };

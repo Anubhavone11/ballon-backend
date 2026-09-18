@@ -1,33 +1,23 @@
 const mongoose = require('mongoose');
 
 const pinCodeServiceFeeSchema = new mongoose.Schema({
-  startPinCode: {
+  pinCode: {
     type: String,
     required: true,
+    unique: true, // one fee per pin code
     trim: true,
     validate: {
-      validator: function(v) {
+      validator: function (v) {
         return /^\d{6}$/.test(v);
       },
-      message: 'Start pin code must be a 6-digit number'
+      message: 'Pin code must be a 6-digit number'
     }
   },
-  endPinCode: {
-    type: String,
-    required: true,
-    trim: true,
-    validate: {
-      validator: function(v) {
-        return /^\d{6}$/.test(v);
-      },
-      message: 'End pin code must be a 6-digit number'
-    }
-  },
+  // null/empty = use the default service fee setting
   serviceFee: {
     type: Number,
-    required: true,
     min: 0,
-    default: 0
+    default: null
   },
   description: {
     type: String,
@@ -42,16 +32,7 @@ const pinCodeServiceFeeSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Index for faster lookups
-pinCodeServiceFeeSchema.index({ startPinCode: 1, endPinCode: 1 });
+// Index for faster lookups (pinCode already has a unique index)
 pinCodeServiceFeeSchema.index({ isActive: 1 });
-
-// Validation to ensure startPinCode <= endPinCode
-pinCodeServiceFeeSchema.pre('save', function(next) {
-  if (parseInt(this.startPinCode) > parseInt(this.endPinCode)) {
-    return next(new Error('Start pin code must be less than or equal to end pin code'));
-  }
-  next();
-});
 
 module.exports = mongoose.model('PinCodeServiceFee', pinCodeServiceFeeSchema);
