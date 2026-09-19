@@ -18,7 +18,7 @@ const ABSOLUTE_MAX_BROADCAST_LIMIT = parseInt(process.env.ABSOLUTE_MAX_BROADCAST
 const ANTI_BAN_DELAY_MS            = parseInt(process.env.ANTI_BAN_DELAY_MS, 10)            || 40000;
 const APP_BASE_URL                 = process.env.APP_BASE_URL || "https://decoryy.com";
 const API_BASE_URL                 = process.env.API_BASE_URL || "https://api.decoryy.com/api/bookings";
-const TRACKING_TOKEN_SECRET        = process.env.TRACKING_TOKEN_SECRET; 
+const TRACKING_TOKEN_SECRET        = process.env.TRACKING_TOKEN_SECRET;
 const TRACKING_TOKEN_EXPIRY        = process.env.TRACKING_TOKEN_EXPIRY || "24h";
 
 // Statuses that mean "this job is decided, stop offering it to other sellers"
@@ -38,7 +38,7 @@ const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const normalizePhone = (rawPhone) => {
-  const clean = rawPhone.replace(/\D/g, "");
+  const clean = String(rawPhone).replace(/\D/g, "");
   return clean.length === 10 ? `91${clean}` : clean;
 };
 
@@ -46,7 +46,7 @@ const normalizePhone = (rawPhone) => {
 
 const uploadImageToMeta = async (imageUrl) => {
   try {
-    const response = await axios.get(imageUrl, { responseType: 'arraybuffer' });
+    const response = await axios.get(imageUrl, { responseType: "arraybuffer" });
     const jpegBuffer = await sharp(response.data).jpeg().toBuffer();
 
     const form = new FormData();
@@ -64,7 +64,7 @@ const uploadImageToMeta = async (imageUrl) => {
       }
     );
 
-    return metaResponse.data.id; 
+    return metaResponse.data.id;
   } catch (error) {
     console.error("❌ Media upload failed:", error?.response?.data || error.message);
     return null;
@@ -194,16 +194,16 @@ const sendVendorAssignedToCustomer = async (booking, seller) => {
                 { type: "text", text: booking.selectedProductId?.name || "Decor" },
                 { type: "text", text: seller.businessPhone || "N/A" },
                 { type: "text", text: booking.selectedProductId?.instantDeliveryTime || "30-60 mins" },
-              ]
-            }
-          ]
-        }
+              ],
+            },
+          ],
+        },
       },
       {
         headers: {
           Authorization: `Bearer ${process.env.WA_ACCESS_TOKEN}`,
-          "Content-Type": "application/json"
-        }
+          "Content-Type": "application/json",
+        },
       }
     );
 
@@ -219,7 +219,7 @@ const sendVendorAssignedToCustomer = async (booking, seller) => {
 
 const processMatchmakingPipeline = async (bookingId) => {
   try {
-    const booking = await Booking.findById(bookingId).populate('selectedProductId');
+    const booking = await Booking.findById(bookingId).populate("selectedProductId");
     if (!booking || ACTIVE_STATUSES.includes(booking.status)) return;
 
     const sellerQueue = booking.routingQueue || [];
@@ -250,7 +250,7 @@ const processMatchmakingPipeline = async (bookingId) => {
         notifiedSellerId: null,
       },
       { new: true }
-    ).populate('selectedProductId');
+    ).populate("selectedProductId");
 
     if (!updatedBooking) return;
 
@@ -448,7 +448,7 @@ exports.acceptBooking = async (req, res) => {
       console.error("❌ Customer post-accept notification error:", err)
     );
 
-    if (req.xhr || req.headers.accept?.includes('application/json') || !req.query.sellerId) {
+    if (req.xhr || req.headers.accept?.includes("application/json") || !req.query.sellerId) {
       return res.json({ success: true, message: "Booking accepted!", booking: populatedBooking });
     }
 
@@ -458,7 +458,7 @@ exports.acceptBooking = async (req, res) => {
     console.error("acceptBooking error:", err);
     const msg = err.code ? err.message : "Could not accept this booking. Please try again.";
 
-    if (req.xhr || req.headers.accept?.includes('application/json')) {
+    if (req.xhr || req.headers.accept?.includes("application/json")) {
       return res.status(409).json({ success: false, message: msg });
     }
     return res.status(409).send(warningPage(msg));
@@ -488,7 +488,7 @@ exports.rejectBooking = async (req, res) => {
       );
     }
 
-    return res.send(rejectPage(bookingId, sellerId));
+    return res.send(rejectPage());
   } catch (err) {
     console.error("rejectBooking error:", err);
     return res.status(500).send(errorPage("Something went wrong while processing your rejection."));
@@ -540,14 +540,14 @@ exports.sellerCancelBooking = async (req, res) => {
       return res.status(404).json({ success: false, message: "Booking not found for your account." });
     }
 
-    if (booking.status === 'completed') {
+    if (booking.status === "completed") {
       return res.status(400).json({ success: false, message: "Completed bookings cannot be cancelled." });
     }
 
-    booking.status              = 'cancelled';
+    booking.status              = "cancelled";
     booking.cancellationDetails = {
-      cancelledBy: 'seller',
-      reason: cancellationReason || 'Cancelled by decorator.',
+      cancelledBy: "seller",
+      reason: cancellationReason || "Cancelled by decorator.",
       timestamp: new Date(),
     };
     await booking.save();
@@ -763,213 +763,266 @@ exports.getBookingStatus = async (req, res) => {
 
 exports.processMatchmakingPipeline = processMatchmakingPipeline;
 
-// ─── Decoryy HTML Brand Templates ─────────────────────────────────────────────
+// ─── Decoryy partner pages (accept / decline / unavailable / error) ───────────
 
-const baseHtml = (content, title = "Decoryy | Instant Decoration Service") => `
-<!DOCTYPE html>
+// Escape anything that ends up inside HTML (vendor/customer text is user input).
+const esc = (value) =>
+  String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+
+const formatINR = (amount) => {
+  const n = Number(amount);
+  return Number.isFinite(n) && n > 0 ? `₹${n.toLocaleString("en-IN")}` : "";
+};
+
+const ICONS = {
+  success:
+    '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+  neutral:
+    '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 12h12"/></svg>',
+  warning:
+    '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5"/><path d="M12 16.2v.1"/></svg>',
+  error:
+    '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4l9 16H3L12 4z"/><path d="M12 10v4"/><path d="M12 17.2v.1"/></svg>',
+};
+
+const baseHtml = (content, title = "Decoryy Partner") => `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${title}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>${esc(title)}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Playfair+Display:wght@700;800&display=swap" rel="stylesheet">
-  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
-    body { font-family: 'Plus Jakarta Sans', sans-serif; }
-    .font-brand { font-family: 'Playfair Display', Georgia, serif; }
-  </style>
-  <script>
-    function copyToClipboard(text, elemId) {
-      navigator.clipboard.writeText(text).then(() => {
-        const btn = document.getElementById(elemId);
-        if (btn) {
-          const original = btn.innerHTML;
-          btn.innerText = "Copied!";
-          btn.classList.add("bg-emerald-100", "text-emerald-700");
-          setTimeout(() => {
-            btn.innerHTML = original;
-            btn.classList.remove("bg-emerald-100", "text-emerald-700");
-          }, 2000);
-        }
-      });
+    :root {
+      --bg: #f5f5f4;
+      --surface: #ffffff;
+      --ink: #1c1917;
+      --ink-2: #57534e;
+      --ink-3: #a8a29e;
+      --line: #e7e5e4;
+      --brand: #e8a200;
+      --brand-ink: #1c1917;
+      --ok: #15803d;
+      --ok-bg: #dcfce7;
+      --warn: #b45309;
+      --warn-bg: #fef3c7;
+      --bad: #b91c1c;
+      --bad-bg: #fee2e2;
+      --muted-bg: #f5f5f4;
     }
-  </script>
+    * { box-sizing: border-box; margin: 0; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 15px;
+      line-height: 1.5;
+    }
+    .topbar {
+      background: var(--surface);
+      border-bottom: 1px solid var(--line);
+    }
+    .topbar-inner {
+      max-width: 520px;
+      margin: 0 auto;
+      padding: 14px 20px;
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+    }
+    .logo { font-size: 18px; font-weight: 700; letter-spacing: -0.02em; }
+    .topbar span { font-size: 13px; color: var(--ink-3); }
+
+    main { flex: 1; width: 100%; max-width: 520px; margin: 0 auto; padding: 24px 20px 40px; }
+
+    .status { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 20px; }
+    .status-icon {
+      flex: none;
+      width: 44px; height: 44px;
+      border-radius: 50%;
+      display: grid; place-items: center;
+    }
+    .status-icon.ok      { background: var(--ok-bg);   color: var(--ok); }
+    .status-icon.neutral { background: #e7e5e4;        color: var(--ink-2); }
+    .status-icon.warn    { background: var(--warn-bg); color: var(--warn); }
+    .status-icon.bad     { background: var(--bad-bg);  color: var(--bad); }
+    h1 { font-size: 20px; line-height: 1.3; font-weight: 700; letter-spacing: -0.01em; }
+    .lede { margin-top: 4px; color: var(--ink-2); font-size: 14px; }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      margin-bottom: 16px;
+    }
+    .item { display: flex; gap: 14px; align-items: center; padding: 14px; }
+    .item img {
+      width: 64px; height: 64px;
+      border-radius: 6px;
+      object-fit: cover;
+      background: var(--muted-bg);
+      flex: none;
+    }
+    .item-name { font-weight: 600; }
+    .item-price { color: var(--ink-2); font-size: 14px; }
+
+    .rows { padding: 4px 14px; }
+    .row { padding: 12px 0; border-bottom: 1px solid var(--line); }
+    .row:last-child { border-bottom: 0; }
+    .row dt { font-size: 13px; color: var(--ink-3); margin-bottom: 2px; }
+    .row dd { font-size: 15px; font-weight: 500; overflow-wrap: anywhere; }
+    .panel-head { padding: 12px 14px; border-bottom: 1px solid var(--line); font-size: 13px; font-weight: 600; color: var(--ink-2); }
+
+    .actions { display: grid; gap: 10px; margin-top: 4px; }
+    .btn {
+      display: flex; align-items: center; justify-content: center;
+      min-height: 46px;
+      padding: 0 16px;
+      border-radius: 8px;
+      font: inherit; font-weight: 600;
+      text-decoration: none;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      color: var(--ink);
+    }
+    .btn.primary { background: var(--brand); border-color: var(--brand); color: var(--brand-ink); }
+    .btn:focus-visible, .link:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+    .btn:active { filter: brightness(0.96); }
+    .link { text-align: center; color: var(--ink-2); font-size: 14px; padding: 8px; }
+
+    .note { margin-top: 18px; font-size: 13px; color: var(--ink-3); }
+
+    footer { padding: 16px 20px 24px; text-align: center; font-size: 12px; color: var(--ink-3); }
+  </style>
 </head>
-<body class="bg-[#F8F9FA] text-slate-800 flex flex-col min-h-screen">
-  <header class="w-full bg-white border-b border-slate-100 py-3.5 px-6 flex items-center justify-between shadow-sm">
-    <div class="flex items-center gap-2">
-      <span class="text-xl font-brand font-extrabold text-slate-900 tracking-tight">Decoryy</span>
-      <span class="text-[8px] font-bold tracking-widest uppercase px-2 py-0.5 bg-amber-50 text-amber-600 rounded-full border border-amber-200/60">Partner</span>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="logo">Decoryy</div>
+      <span>Partner</span>
     </div>
-    <span class="text-[11px] font-semibold text-slate-400">Order Dispatch</span>
   </header>
-
-  <main class="flex-1 flex items-center justify-center p-4">
-    ${content}
-  </main>
-
-  <footer class="py-4 text-center text-xs text-slate-400 border-t border-slate-100 bg-white">
-    © ${new Date().getFullYear()} Decoryy Instant Decoration Service. All rights reserved.
-  </footer>
+  <main>${content}</main>
+  <footer>© ${new Date().getFullYear()} Decoryy</footer>
 </body>
 </html>`;
 
+const statusBlock = (tone, icon, heading, text) => `
+  <div class="status">
+    <div class="status-icon ${tone}">${icon}</div>
+    <div>
+      <h1>${esc(heading)}</h1>
+      <p class="lede">${text}</p>
+    </div>
+  </div>`;
+
+const row = (label, value) =>
+  value
+    ? `<div class="row"><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`
+    : "";
+
+// Accepted
 const successPage = (booking, seller) => {
   const product = booking.selectedProductId || {};
   const productId = product._id || booking.selectedProductId;
   const productUrl = productId ? `${APP_BASE_URL}/product/${productId}` : `${APP_BASE_URL}/shop`;
-  const productImage = product.image?.url || product.image || "https://upload.wikimedia.org/wikipedia/commons/e/e1/FullMoon2010.jpg";
-  const venue = booking.pickupLocation?.address || "Address details on dashboard";
+  const image = product.image?.url || product.image || "";
+  const price = formatINR(product.price || booking.estimatedPrice);
+  const venue = booking.pickupLocation?.address || "";
+  const customerName = booking.serviceDetails?.name || "";
+  const customerPhone = booking.customerPhone ? normalizePhone(booking.customerPhone) : "";
+  const shortId = String(booking._id).slice(-8).toUpperCase();
 
-  const acceptUrl = `${API_BASE_URL}/accept/${booking._id}?sellerId=${seller?._id || ''}`;
-  const declineUrl = `${API_BASE_URL}/reject/${booking._id}?sellerId=${seller?._id || ''}`;
+  const coords = booking.pickupLocation?.coordinates; // stored as [lng, lat]
+  const directionsUrl =
+    Array.isArray(coords) && coords.length === 2
+      ? `https://www.google.com/maps/dir/?api=1&destination=${coords[1]},${coords[0]}`
+      : "";
 
-  return baseHtml(`
-    <div class="max-w-md w-full bg-white rounded-3xl p-6 sm:p-8 border border-slate-100 shadow-xl text-center space-y-6">
-      
-      <div class="w-16 h-16 bg-amber-50 text-amber-500 border border-amber-200/60 rounded-full flex items-center justify-center mx-auto text-3xl shadow-sm">
-        🎉
-      </div>
+  return baseHtml(
+    `
+    ${statusBlock(
+      "ok",
+      ICONS.success,
+      "Booking confirmed",
+      `Thanks${seller?.name ? ", " + esc(seller.name) : ""}. This job is yours and the customer has been notified.`
+    )}
 
-      <div class="space-y-1.5">
-        <h1 class="text-2xl font-bold text-slate-900">Job Accepted!</h1>
-        <p class="text-slate-500 text-xs sm:text-sm">This package is confirmed for you, <span class="font-semibold text-slate-800">${seller?.name || "Partner"}</span>. The customer has been notified.</p>
-      </div>
-
-      <!-- Item Card with Link -->
-      <div class="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/70 text-left flex gap-3.5 items-center">
-        <img src="${productImage}" alt="${product.name || 'Setup'}" class="w-16 h-16 rounded-xl object-cover flex-shrink-0 border border-slate-200" />
-        <div class="flex-1 min-w-0">
-          <p class="text-[11px] font-bold text-amber-600 uppercase tracking-wider">Booked Package</p>
-          <p class="font-bold text-sm text-slate-800 truncate">${product.name || "Decoration Package"}</p>
-          <p class="text-xs font-semibold text-slate-600 mt-0.5">₹${product.price || booking.estimatedPrice || '0'}</p>
+    <section class="panel">
+      <div class="item">
+        ${image ? `<img src="${esc(image)}" alt="" width="64" height="64">` : ""}
+        <div>
+          <div class="item-name">${esc(product.name || "Decoration package")}</div>
+          ${price ? `<div class="item-price">${esc(price)}</div>` : ""}
         </div>
       </div>
+    </section>
 
-      <!-- Booking Specs -->
-      <div class="p-4 bg-white rounded-2xl border border-slate-100 text-left space-y-2.5 text-xs">
-        <div class="flex justify-between items-center py-1 border-b border-slate-50">
-          <span class="text-slate-400 font-medium">Customer:</span>
-          <span class="font-bold text-slate-700">${booking.serviceDetails?.name || "Client"}</span>
-        </div>
-        <div class="flex justify-between items-center py-1 border-b border-slate-50">
-          <span class="text-slate-400 font-medium">Delivery Speed:</span>
-          <span class="font-bold text-emerald-600">${product.instantDeliveryTime || "30-60 mins"}</span>
-        </div>
-        <div class="py-1">
-          <span class="text-slate-400 font-medium block mb-1">Venue Address:</span>
-          <span class="font-semibold text-slate-700 block bg-slate-50 p-2 rounded-lg leading-relaxed text-[11px]">${venue}</span>
-        </div>
-      </div>
+    <section class="panel">
+      <div class="panel-head">Booking details</div>
+      <dl class="rows">
+        ${row("Customer", customerName)}
+        ${row("Set up within", product.instantDeliveryTime || "30–60 mins")}
+        ${row("Venue address", venue)}
+        ${row("Booking ID", shortId)}
+      </dl>
+    </section>
 
-      <!-- Dispatch Reference Links Section -->
-      <div class="p-3.5 bg-slate-50/80 rounded-2xl border border-slate-200/60 text-left space-y-2.5">
-        <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Order Dispatch Links</span>
-        
-        <div class="space-y-1.5">
-          <div class="flex items-center justify-between gap-2 bg-white px-2.5 py-1.5 rounded-lg border border-slate-200/80">
-            <span class="text-[11px] text-slate-500 font-medium truncate flex-1">${acceptUrl}</span>
-            <button id="copyAcceptBtn" onclick="copyToClipboard('${acceptUrl}', 'copyAcceptBtn')" class="text-[10px] bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold px-2 py-1 rounded transition whitespace-nowrap">
-              Copy Accept Link
-            </button>
-          </div>
-
-          <div class="flex items-center justify-between gap-2 bg-white px-2.5 py-1.5 rounded-lg border border-slate-200/80">
-            <span class="text-[11px] text-slate-500 font-medium truncate flex-1">${declineUrl}</span>
-            <button id="copyDeclineBtn" onclick="copyToClipboard('${declineUrl}', 'copyDeclineBtn')" class="text-[10px] bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold px-2 py-1 rounded transition whitespace-nowrap">
-              Copy Decline Link
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Action Buttons -->
-      <div class="space-y-2.5 pt-2">
-        <a href="${productUrl}" target="_blank" class="w-full inline-flex items-center justify-center gap-2 bg-[#FFB000] hover:bg-[#e09b00] text-white font-bold py-3.5 px-4 rounded-xl transition-all shadow-md shadow-amber-500/20 text-sm">
-          <span>View Product Page</span>
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
-        </a>
-        <button onclick="window.close()" class="w-full bg-slate-100 hover:bg-slate-200 text-slate-600 font-semibold py-3 px-4 rounded-xl transition text-xs">
-          Close Window
-        </button>
-      </div>
-
+    <div class="actions">
+      ${directionsUrl ? `<a class="btn primary" href="${esc(directionsUrl)}" target="_blank" rel="noopener">Get directions</a>` : ""}
+      ${customerPhone ? `<a class="btn" href="tel:+${esc(customerPhone)}">Call customer</a>` : ""}
+      <a class="link" href="${esc(productUrl)}" target="_blank" rel="noopener">View package details</a>
     </div>
-  `);
+
+    <p class="note">You won't receive new requests until this booking is marked complete.</p>
+    `,
+    "Booking confirmed · Decoryy Partner"
+  );
 };
 
-const rejectPage = (bookingId, sellerId) => {
-  const acceptUrl = bookingId && sellerId ? `${API_BASE_URL}/accept/${bookingId}?sellerId=${sellerId}` : '';
-  const declineUrl = bookingId && sellerId ? `${API_BASE_URL}/reject/${bookingId}?sellerId=${sellerId}` : '';
+// Declined
+const rejectPage = () =>
+  baseHtml(
+    `
+    ${statusBlock(
+      "neutral",
+      ICONS.neutral,
+      "Request declined",
+      "We've passed this booking to the next available decorator. You won't be offered it again."
+    )}
+    <p class="note">You can close this page.</p>
+    `,
+    "Request declined · Decoryy Partner"
+  );
 
-  return baseHtml(`
-  <div class="max-w-md w-full bg-white rounded-3xl p-6 sm:p-8 border border-slate-100 shadow-xl text-center space-y-6">
-    <div class="w-16 h-16 bg-slate-100 text-slate-500 rounded-full flex items-center justify-center mx-auto text-2xl">
-      ↩️
-    </div>
-    <div class="space-y-1.5">
-      <h1 class="text-xl font-bold text-slate-900">Offer Declined</h1>
-      <p class="text-slate-500 text-xs sm:text-sm">No worries! We have released this task to the next available decorator.</p>
-    </div>
+// Unavailable (taken / expired / busy)
+const warningPage = (message) =>
+  baseHtml(
+    `
+    ${statusBlock("warn", ICONS.warning, "This request is no longer available", esc(message))}
+    <p class="note">New requests will reach you on WhatsApp as they come in.</p>
+    `,
+    "Request unavailable · Decoryy Partner"
+  );
 
-    ${bookingId && sellerId ? `
-      <!-- Dispatch Reference Links Section -->
-      <div class="p-3.5 bg-slate-50/80 rounded-2xl border border-slate-200/60 text-left space-y-2.5">
-        <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Order Dispatch Links</span>
-        
-        <div class="space-y-1.5">
-          <div class="flex items-center justify-between gap-2 bg-white px-2.5 py-1.5 rounded-lg border border-slate-200/80">
-            <span class="text-[11px] text-slate-500 font-medium truncate flex-1">${acceptUrl}</span>
-            <button id="copyAcceptBtn" onclick="copyToClipboard('${acceptUrl}', 'copyAcceptBtn')" class="text-[10px] bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold px-2 py-1 rounded transition whitespace-nowrap">
-              Copy Accept Link
-            </button>
-          </div>
-
-          <div class="flex items-center justify-between gap-2 bg-white px-2.5 py-1.5 rounded-lg border border-slate-200/80">
-            <span class="text-[11px] text-slate-500 font-medium truncate flex-1">${declineUrl}</span>
-            <button id="copyDeclineBtn" onclick="copyToClipboard('${declineUrl}', 'copyDeclineBtn')" class="text-[10px] bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold px-2 py-1 rounded transition whitespace-nowrap">
-              Copy Decline Link
-            </button>
-          </div>
-        </div>
-      </div>
-    ` : ''}
-
-    <button onclick="window.close()" class="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold py-3.5 px-4 rounded-xl transition text-xs shadow-md">
-      Close Window
-    </button>
-  </div>
-`);
-};
-
-const warningPage = (message) => baseHtml(`
-  <div class="max-w-md w-full bg-white rounded-3xl p-6 sm:p-8 border border-slate-100 shadow-xl text-center space-y-6">
-    <div class="w-16 h-16 bg-amber-50 text-amber-500 border border-amber-200/60 rounded-full flex items-center justify-center mx-auto text-2xl">
-      ⏳
-    </div>
-    <div class="space-y-1.5">
-      <h1 class="text-xl font-bold text-slate-900">Request Unavailable</h1>
-      <p class="text-slate-500 text-xs sm:text-sm leading-relaxed">${message}</p>
-    </div>
-    <button onclick="window.close()" class="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-3 px-4 rounded-xl transition text-xs">
-      Close Window
-    </button>
-  </div>
-`);
-
-const errorPage = (message) => baseHtml(`
-  <div class="max-w-md w-full bg-white rounded-3xl p-6 sm:p-8 border border-slate-100 shadow-xl text-center space-y-5">
-    <div class="w-14 h-14 bg-rose-50 text-rose-500 border border-rose-200/60 rounded-full flex items-center justify-center mx-auto text-2xl">
-      ⚠️
-    </div>
-    <div class="space-y-1">
-      <h1 class="text-lg font-bold text-slate-900">Something went wrong</h1>
-      <p class="text-slate-500 text-xs leading-relaxed">${message}</p>
-    </div>
-    <button onclick="window.close()" class="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-3 px-4 rounded-xl transition text-xs">
-      Close
-    </button>
-  </div>
-`);
+// Error
+const errorPage = (message) =>
+  baseHtml(
+    `
+    ${statusBlock("bad", ICONS.error, "We couldn't open this request", esc(message))}
+    <p class="note">Open the link again from your WhatsApp message. If this keeps happening, contact Decoryy support.</p>
+    `,
+    "Something went wrong · Decoryy Partner"
+  );

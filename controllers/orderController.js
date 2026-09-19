@@ -1,12 +1,13 @@
 const Order = require('../models/Order');
 const Counter = require('../models/Counter');
 const Seller = require('../models/Seller');
-const fs = require('fs').promises;
-const path = require('path');
-const ordersJsonPath = path.join(__dirname, '../data/orders.json');
 const Product = require('../models/Product');
 const commissionController = require('./commissionController');
 const nodemailer = require('nodemailer');
+const axios = require('axios');
+const fs = require('fs').promises;
+const path = require('path');
+const ordersJsonPath = path.join(__dirname, '../data/orders.json');
 
 // Utility function to format scheduled delivery time
 const formatScheduledDelivery = (scheduledDelivery) => {
@@ -30,6 +31,12 @@ const formatScheduledDelivery = (scheduledDelivery) => {
   };
 };
 
+// Normalize phone to country code + number without '+' or symbols
+const normalizePhone = (rawPhone) => {
+  const clean = String(rawPhone || '').replace(/\D/g, '');
+  return clean.length === 10 ? `91${clean}` : clean;
+};
+
 // Setup nodemailer transporter
 const transporter = nodemailer.createTransport({
   service: 'gmail',
@@ -38,6 +45,7 @@ const transporter = nodemailer.createTransport({
     pass: process.env.EMAIL_PASS,
   },
 });
+
 // Delete an order
 const deleteOrder = async (req, res) => {
   try {
@@ -74,6 +82,131 @@ const deleteOrder = async (req, res) => {
     });
   }
 };
+
+// Send Order Confirmation via WhatsApp Cloud API
+const sendOrderConfirmationWhatsApp = async (order) => {
+  // Declared outside the try block so the catch handler can log the
+  // exact payload that was (or would have been) sent to Meta.
+  let payload = null;
+
+  try {
+    // --- Preflight: catch silent misconfiguration before calling out ---
+    if (!process.env.WA_PHONE_NUMBER_ID || !process.env.WA_ACCESS_TOKEN) {
+      console.error(
+        `[WhatsApp] Skipping order #${order.customOrderId}: ` +
+        `WA_PHONE_NUMBER_ID or WA_ACCESS_TOKEN is not set in the environment.`
+      );
+      return false;
+    }
+
+    if (!order.phone) {
+      console.warn(
+        `[WhatsApp] Skipping order #${order.customOrderId}: ` +
+        `No phone number on the saved order (order.phone is falsy).`
+      );
+      return false;
+    }
+
+    const recipientPhone = normalizePhone(order.phone);
+
+    // Log the raw vs normalized phone so malformed numbers are obvious
+    // (e.g. missing digits, extra symbols, 9 or 11 digit values).
+    console.log(
+      `[WhatsApp] Order #${order.customOrderId} — raw phone="${order.phone}" ` +
+      `normalized="${recipientPhone}" (length=${recipientPhone.length})`
+    );
+
+    if (recipientPhone.length < 11 || recipientPhone.length > 13) {
+      console.warn(
+        `[WhatsApp] Order #${order.customOrderId}: normalized phone ` +
+        `"${recipientPhone}" has an unexpected length — message will likely fail silently on Meta's side.`
+      );
+    }
+
+    // Delivery text formatting
+    let deliveryText = 'Standard Delivery';
+    if (order.scheduledDelivery) {
+      const d = new Date(order.scheduledDelivery);
+      deliveryText = d.toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        dateStyle: 'medium',
+        timeStyle: 'short',
+      });
+    }
+
+    // Single-line address formatting (Meta rejects multi-line values in body params)
+    const addr = order.address || {};
+    const street = addr.street || '';
+    const city = addr.city ? `, ${addr.city}` : '';
+    const pincode = addr.pincode ? ` - ${addr.pincode}` : '';
+    const fullAddress = `${street}${city}${pincode}`.trim() || 'Address on file';
+
+    // Payment label mapping
+    const paymentStatusMap = {
+      completed: 'Paid',
+      pending_upfront: 'Upfront Pending',
+      pending: 'Pending',
+    };
+    const paymentLabel = paymentStatusMap[order.paymentStatus] || order.paymentStatus || 'Pending';
+
+    payload = {
+      messaging_product: 'whatsapp',
+      to: recipientPhone,
+      type: 'template',
+      template: {
+        name: 'decoryy_order_confirmation',
+        // NOTE: Meta templates are very often registered as a region-specific
+        // locale (e.g. "en_US") rather than plain "en". If messages are
+        // silently failing with error code 132001 ("template not found"),
+        // change this to match exactly what's approved in Meta Business Manager.
+        language: { code: 'en' },
+        components: [
+          {
+            type: 'body',
+            parameters: [
+              { type: 'text', text: order.customerName || 'Customer' },          // {{1}}
+              { type: 'text', text: String(order.customOrderId) },               // {{2}}
+              { type: 'text', text: Number(order.totalAmount || 0).toFixed(2) }, // {{3}}
+              { type: 'text', text: paymentLabel },                              // {{4}}
+              { type: 'text', text: deliveryText },                              // {{5}}
+              { type: 'text', text: fullAddress },                               // {{6}}
+            ],
+          },
+        ],
+      },
+    };
+
+    const response = await axios.post(
+      `https://graph.facebook.com/v23.0/${process.env.WA_PHONE_NUMBER_ID}/messages`,
+      payload,
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.WA_ACCESS_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    console.log(
+      `[WhatsApp] Order confirmation sent for #${order.customOrderId}:`,
+      response.data?.messages?.[0]?.id
+    );
+    return true;
+  } catch (err) {
+    // Log the full Meta error body (error code + message) AND the exact
+    // payload that triggered it, so a failure can be diagnosed from logs
+    // alone without needing to reproduce it.
+    console.error(
+      `[WhatsApp] Failed to send order notification for #${order?.customOrderId}:`,
+      JSON.stringify(err.response?.data || { message: err.message }, null, 2)
+    );
+    if (payload) {
+      console.error('[WhatsApp] Payload that failed:', JSON.stringify(payload, null, 2));
+    }
+    return false;
+  }
+};
+
 // Create a new order
 const createOrder = async (req, res) => {
   try {
@@ -164,7 +297,6 @@ const createOrder = async (req, res) => {
         });
       }
 
-      // Convert times to IST for accurate day and hour checks
       const deliveryDateIST = new Date(deliveryDate.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
       const minDeliveryDate = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
       minDeliveryDate.setHours(0, 0, 0, 0);
@@ -219,6 +351,12 @@ const createOrder = async (req, res) => {
 
     const savedOrder = await newOrder.save();
 
+    // Sanity check right after save: confirms whether `phone` actually
+    // made it into the persisted document (schema issues show up here).
+    console.log(
+      `[Order] Saved #${savedOrder.customOrderId} — phone on saved doc: "${savedOrder.phone}"`
+    );
+
     // Commission logic
     let commission = 0;
     let seller = null;
@@ -251,11 +389,10 @@ const createOrder = async (req, res) => {
       }
     }
 
-    // JSON backup (non-blocking)
+    // Non-blocking background operations
     appendOrderToJson(savedOrder).catch(err => console.error('JSON backup failed:', err));
-
-    // Send confirmation email (non-blocking)
     sendOrderConfirmationEmail(savedOrder).catch(err => console.error('Email notification failed:', err));
+    sendOrderConfirmationWhatsApp(savedOrder).catch(err => console.error('WhatsApp notification failed:', err));
 
     const orderResponse = {
       ...savedOrder.toObject(),
@@ -282,7 +419,7 @@ const createOrder = async (req, res) => {
 // Redesigned order confirmation email
 async function sendOrderConfirmationEmail(order) {
   const { email, customerName, items, addOns, totalAmount, address, scheduledDelivery, customOrderId, paymentMethod, paymentStatus, upfrontAmount, remainingAmount, transactionId, phone } = order;
-  const subject = '🎉 Congratulations! Your Order is Confirmed - Decoryy';
+  const subject = 'Your Order is Confirmed - Decoryy';
 
   const itemsSubtotal = (items || []).reduce((sum, item) => sum + (item.price * item.quantity), 0);
   const addOnsTotal = (addOns && addOns.length > 0) ? addOns.reduce((sum, addOn) => sum + (addOn.price * (addOn.quantity || 1)), 0) : 0;
@@ -325,7 +462,7 @@ async function sendOrderConfirmationEmail(order) {
     }).join('');
 
     addOnsHtml = `
-      <h3 style="color: #444; border-bottom: 2px solid #FFD700; padding-bottom: 5px; margin-top: 25px; margin-bottom: 10px; font-size: 18px;">✨ Add-Ons</h3>
+      <h3 style="color: #444; border-bottom: 2px solid #FFD700; padding-bottom: 5px; margin-top: 25px; margin-bottom: 10px; font-size: 18px;">Add-Ons</h3>
       <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
         <thead>
           <tr>
@@ -342,7 +479,7 @@ async function sendOrderConfirmationEmail(order) {
   let mapLink = '';
   if (address && address.location && Array.isArray(address.location.coordinates) && address.location.coordinates.length === 2) {
     const [lng, lat] = address.location.coordinates;
-    mapLink = `<br/><a href="https://www.google.com/maps?q=${lat},${lng}" target="_blank" style="color: #E65100; font-weight: bold; text-decoration: none;">📍 View on Map</a>`;
+    mapLink = `<br/><a href="https://www.google.com/maps?q=${lat},${lng}" target="_blank" style="color: #E65100; font-weight: bold; text-decoration: none;">View on Map</a>`;
   }
 
   const addressHtml = `
@@ -362,19 +499,19 @@ async function sendOrderConfirmationEmail(order) {
     const formattedDate = deliveryDate.toLocaleString('en-IN', options);
     scheduledDeliveryHtml = `
       <div style="margin-bottom: 20px; padding: 12px; background-color: #FFF9C4; border-left: 4px solid #FBC02D; border-radius: 5px; color: #444;">
-        <strong style="font-size: 16px;">📅 Scheduled Delivery:</strong><br/>
+        <strong style="font-size: 16px;">Scheduled Delivery:</strong><br/>
         <span style="font-size: 15px;">${formattedDate}</span>
       </div>
     `;
   }
 
   const paymentMethodText = paymentMethod === 'cod' ? 'Cash on Delivery' : paymentMethod === 'phonepe' || paymentMethod === 'online' ? 'Online Payment (PhonePe)' : paymentMethod || 'N/A';
-  const paymentStatusText = paymentStatus === 'completed' ? '✅ Paid' : paymentStatus === 'pending_upfront' ? '⏳ Upfront Pending' : '⏳ Pending';
+  const paymentStatusText = paymentStatus === 'completed' ? 'Paid' : paymentStatus === 'pending_upfront' ? 'Upfront Pending' : 'Pending';
   const paymentStatusColor = paymentStatus === 'completed' ? '#4CAF50' : '#FF9800';
 
   let paymentDetailsHtml = `
     <div style="margin-bottom: 20px; padding: 12px; background-color: #F0F4F8; border-left: 4px solid #2196F3; border-radius: 5px;">
-      <strong style="font-size: 16px; color: #1976D2;">💳 Payment Method:</strong> ${paymentMethodText}<br/>
+      <strong style="font-size: 16px; color: #1976D2;">Payment Method:</strong> ${paymentMethodText}<br/>
       <strong style="font-size: 16px; color: #1976D2;">Status:</strong> <span style="color: ${paymentStatusColor}; font-weight: bold;">${paymentStatusText}</span><br/>
       ${upfrontAmount > 0 ? `<span style="font-size: 14px;">Upfront Amount: ₹${Number(upfrontAmount).toFixed(2)}</span><br/>` : ''}
       ${remainingAmount > 0 ? `<span style="font-size: 14px;">Remaining Due on Delivery: ₹${Number(remainingAmount).toFixed(2)}</span><br/>` : ''}
@@ -395,13 +532,13 @@ async function sendOrderConfirmationEmail(order) {
   const htmlBody = `
     <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 650px; margin: 0 auto; background-color: #FFFFFF; border: 3px solid #FFD700; border-radius: 12px; padding: 25px;">
       <div style="text-align: center; background: linear-gradient(135deg, #FFD700 0%, #FFA000 100%); padding: 25px; border-radius: 10px; margin-bottom: 25px;">
-        <h1 style="color: #FFFFFF; margin: 0; font-size: 32px;">🎉 Congratulations! 🎉</h1>
-        <p style="color: #FFFFFF; margin: 10px 0 0 0; font-size: 18px; font-weight: bold;">Your Order Has Been Confirmed!</p>
+        <h1 style="color: #FFFFFF; margin: 0; font-size: 28px;">Order Confirmed</h1>
+        <p style="color: #FFFFFF; margin: 10px 0 0 0; font-size: 16px;">Thank you for your order with Decoryy</p>
       </div>
 
       <div style="background-color: #FFF9C4; padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 5px solid #FFC107;">
         <p style="color: #333; font-size: 16px; line-height: 1.6; margin: 0;">
-          Hello <strong style="color: #E65100;">${customerName}</strong>! 👋 Your celebration preparations are in motion!
+          Hello <strong style="color: #E65100;">${customerName}</strong>, your celebration preparations are in motion.
         </p>
       </div>
 
@@ -409,19 +546,19 @@ async function sendOrderConfirmationEmail(order) {
       ${paymentDetailsHtml}
 
       <div style="background-color: #F5F5F5; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
-        <h2 style="color: #E65100; margin: 0 0 10px 0; font-size: 18px; border-bottom: 2px solid #FFD700; padding-bottom: 5px;">📋 Order Information</h2>
+        <h2 style="color: #E65100; margin: 0 0 10px 0; font-size: 18px; border-bottom: 2px solid #FFD700; padding-bottom: 5px;">Order Information</h2>
         <p style="margin: 5px 0;"><strong>Order ID:</strong> #${customOrderId}</p>
         <p style="margin: 5px 0;"><strong>Order Date:</strong> ${orderDate}</p>
         ${phone ? `<p style="margin: 5px 0;"><strong>Contact:</strong> ${phone}</p>` : ''}
       </div>
 
       <div style="background-color: #E3F2FD; padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 5px solid #2196F3;">
-        <h3 style="color: #1976D2; margin: 0 0 10px 0; font-size: 18px;">🚚 Delivery Address</h3>
+        <h3 style="color: #1976D2; margin: 0 0 10px 0; font-size: 18px;">Delivery Address</h3>
         ${addressHtml}
       </div>
 
       <div style="background-color: #FFFDE7; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 2px solid #FFD700;">
-        <h2 style="color: #E65100; margin: 0 0 15px 0; font-size: 20px; text-align: center;">💰 Bill Summary</h2>
+        <h2 style="color: #E65100; margin: 0 0 15px 0; font-size: 20px; text-align: center;">Bill Summary</h2>
         <table style="width: 100%; border-collapse: collapse; background-color: #FFFFFF;">
           <thead>
             <tr>
@@ -510,8 +647,8 @@ async function appendOrderToJson(order) {
 }
 
 async function sendOrderStatusUpdateEmail(order) {
-  const { email, customerName, orderStatus, _id, customOrderId } = order;
-  const subject = `🥳 Party Update! Your Order is Now: ${orderStatus.charAt(0).toUpperCase() + orderStatus.slice(1)}`;
+  const { email, customerName, orderStatus, customOrderId } = order;
+  const subject = `Order Status Update: #${customOrderId}`;
 
   const htmlBody = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 2px solid #FFD700; border-radius: 10px;">
