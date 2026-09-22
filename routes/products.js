@@ -4,6 +4,8 @@ const multer = require('multer');
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const cloudinary = require('../config/cloudinary');
 const { isAdmin, authenticateToken } = require('../middleware/auth');
+const identifyUser = require('../middleware/identifyUser'); // [NEW]
+const trackActivity = require('../middleware/trackActivity'); // [NEW]
 const {
   getAllProducts,
   getInstantProducts, // ⚡ ADDED: Dynamic Instant Filter Controller Method
@@ -15,7 +17,7 @@ const {
   deleteProduct,
   getProductsBySection
 } = require('../controllers/productController');
- 
+
 // Configure Cloudinary storage (replaces local diskStorage)
 const storage = new CloudinaryStorage({
   cloudinary,
@@ -28,7 +30,7 @@ const storage = new CloudinaryStorage({
     }
   },
 });
- 
+
 // Configure multer
 const upload = multer({
   storage: storage,
@@ -43,7 +45,7 @@ const upload = multer({
     }
   }
 });
- 
+
 // Configure multiple file upload fields
 const uploadFields = upload.fields([
   { name: 'mainImage', maxCount: 1 },
@@ -57,7 +59,7 @@ const uploadFields = upload.fields([
   { name: 'image8', maxCount: 1 },
   { name: 'image9', maxCount: 1 }
 ]);
- 
+
 // Middleware to handle multer upload
 const handleUpload = (req, res, next) => {
   uploadFields(req, res, function (err) {
@@ -69,29 +71,38 @@ const handleUpload = (req, res, next) => {
     next();
   });
 };
- 
+
 // multer-storage-cloudinary already sets file.path to the full Cloudinary CDN URL,
 // so no manual path-to-URL transform is needed anymore. Kept as a no-op pass-through
 // in case other code still references this middleware name.
 const transformPathsToUrls = (req, res, next) => {
   next();
 };
- 
+
 // Public routes
 router.get("/", getAllProducts);
 router.get("/search/suggestions", getSearchSuggestions);
 router.get("/section/:section", getProductsBySection);
- 
+
 // ⚡ NEW: Explicit scope route for getting instant availability products
 // Placing this right above /:id prevents Express from misinterpreting "service" as a product ID
 router.get("/service/instant", getInstantProducts);
- 
-router.get("/:id", getProduct);
- 
+
+// [NEW] identifyUser: if the visitor has a valid token, attaches req.user so the view
+// can be attributed to them - guests still get the product page, just aren't logged.
+// [NEW] trackActivity: records a 'product_view' ActivityLog entry after the response
+// is sent, with this product's id, for logged-in visitors only.
+router.get(
+  "/:id",
+  identifyUser,
+  trackActivity('product_view', { product: (req) => req.params.id }),
+  getProduct
+);
+
 // Admin routes
 router.post("/", authenticateToken, isAdmin, handleUpload, transformPathsToUrls, createProductWithFiles);
 router.put("/:id", authenticateToken, isAdmin, handleUpload, transformPathsToUrls, updateProductWithFiles);
 router.patch("/:id/sections", authenticateToken, isAdmin, updateProductSections);
 router.delete("/:id", authenticateToken, isAdmin, deleteProduct);
- 
+
 module.exports = router;

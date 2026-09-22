@@ -156,7 +156,7 @@ if (!MONGODB_URI) {
 // =========================================================================
 // ROUTING ARCHITECTURE
 // =========================================================================
- 
+ app.use('/api/activity-tracking', require('./routes/Activityroutes'));
 app.use("/api/shop", productRoutes); 
 app.use("/api/products", productRoutes);
 app.use("/api/orders", orderRoutes);

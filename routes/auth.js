@@ -10,6 +10,8 @@ const crypto = require('crypto');
 const axios = require('axios');
 const User = require('../models/User');
 const TempUser = require('../models/TempUser');
+const ActivityLog = require('../models/ActivityLog'); // [NEW]
+const identifyUser = require('../middleware/identifyUser'); // [NEW] shared soft-auth, used on /logout below
 
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
 
@@ -186,6 +188,15 @@ router.post('/verify-otp', async (req, res) => {
 
     const token = jwt.sign({ id: user._id, phone: user.phone }, JWT_SECRET, { expiresIn: '24h' });
 
+    // [NEW] Record this login. Fire-and-forget — never blocks or fails the response.
+    ActivityLog.create({
+      user: user._id,
+      action: 'login',
+      method: 'otp',
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    }).catch((e) => console.error('ActivityLog (otp login) failed:', e.message));
+
     return res.json({
       message: isNewUser ? 'Account created and logged in.' : 'Logged in successfully.',
       token,
@@ -241,6 +252,15 @@ router.post('/google', async (req, res) => {
 
     const token = jwt.sign({ id: user._id, email: user.email }, JWT_SECRET, { expiresIn: '24h' });
 
+    // [NEW] Record this login.
+    ActivityLog.create({
+      user: user._id,
+      action: 'login',
+      method: 'google',
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    }).catch((e) => console.error('ActivityLog (google login) failed:', e.message));
+
     res.json({
       token,
       user: {
@@ -257,8 +277,26 @@ router.post('/google', async (req, res) => {
 });
 
 // POST /logout
-router.post('/logout', async (req, res) => {
+router.post('/logout', identifyUser, async (req, res) => { // [NEW] identifyUser added
   try {
+    // [NEW] If we could identify the user from their token, log the logout
+    // and work out how long the session lasted from their last login event.
+    if (req.user?.id) {
+      ActivityLog.findOne({ user: req.user.id, action: 'login' })
+        .sort({ createdAt: -1 })
+        .then((lastLogin) => {
+          const sessionDurationMs = lastLogin ? Date.now() - lastLogin.createdAt.getTime() : null;
+          return ActivityLog.create({
+            user: req.user.id,
+            action: 'logout',
+            ip: req.ip,
+            userAgent: req.headers['user-agent'],
+            sessionDurationMs,
+          });
+        })
+        .catch((e) => console.error('ActivityLog (logout) failed:', e.message));
+    }
+
     res.clearCookie('token', {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',

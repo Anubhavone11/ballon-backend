@@ -1219,5 +1219,52 @@
     "updatedAt": "2026-09-19T20:51:48.840Z",
     "__v": 0,
     "id": "6aaef5e4438c69ea76659e20"
+  },
+  {
+    "customOrderId": "decorationcelebration92",
+    "customerName": "aman",
+    "email": "88@gmail.com",
+    "phone": "919608431634",
+    "address": {
+      "street": "sbfs",
+      "pincode": "802301",
+      "country": "India"
+    },
+    "scheduledDelivery": "2026-09-23T08:12:00.000Z",
+    "items": [
+      {
+        "productId": "6992065710766d4c305ba559",
+        "name": "Rice Ceremony Setup",
+        "price": 1699,
+        "quantity": 1,
+        "image": "https://cdn.jsdelivr.net/gh/Bikash-sharma-5/decor-assets@main/products/6992065710766d4c305ba559/gallery-0.webp"
+      }
+    ],
+    "addOns": [
+      {
+        "name": "50 Ceiling Balloons with ribbons Based On Theme",
+        "price": 250,
+        "quantity": 1,
+        "image": "https://res.cloudinary.com/xj4npiub/image/upload/v1790014874/decoryy/addons/addon-1790014873025-708911570.webp"
+      },
+      {
+        "name": "L Shaped Arch Based On Theme",
+        "price": 999,
+        "quantity": 1,
+        "image": "https://res.cloudinary.com/xj4npiub/image/upload/v1790014530/decoryy/addons/addon-1790014529092-410407228.webp"
+      }
+    ],
+    "totalAmount": 2968,
+    "paymentMethod": "cod",
+    "orderStatus": "processing",
+    "paymentStatus": "pending",
+    "upfrontAmount": 0,
+    "remainingAmount": 2968,
+    "commission": 0,
+    "_id": "6ab2389a1a2b9659bdf75e6f",
+    "createdAt": "2026-09-22T08:13:14.288Z",
+    "updatedAt": "2026-09-22T08:13:14.288Z",
+    "__v": 0,
+    "id": "6ab2389a1a2b9659bdf75e6f"
   }
 ]
