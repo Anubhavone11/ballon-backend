@@ -17,7 +17,7 @@ router.post('/login/verify-otp', sellerAuthController.verifyOtp);
 // Real-Time On-Demand Operations
 router.get('/bookings', sellerAuth, sellerAuthController.getSellerAssignedBookings);
 router.patch('/toggle-allocation', sellerAuth, sellerAuthController.toggleAllocationStatus);
-
+router.put('/:id/details', auth, sellerAuthController.updateSellerDetails);
 // Profile paths (using JWT verification)
 router.get('/profile', sellerAuth, sellerAuthController.getProfile);
 router.put('/profile', sellerAuth, sellerAuthController.updateProfile);

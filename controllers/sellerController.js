@@ -1,5 +1,8 @@
 const Seller = require("../models/Seller"); // adjust path/name if your model is called Vendor, Partner, etc.
 
+// Fields that must never leave the server
+const HIDDEN_FIELDS = "-otpHash -otpAttempts -otpExpiresAt -otpLastSentAt";
+
 // ─── GET /api/sellers ──────────────────────────────────────────────────────
 // Admin-facing listing with filters, search, sort, pagination.
 // Query params (all optional):
@@ -58,7 +61,7 @@ exports.getSellers = async (req, res) => {
     const [sellers, total] = await Promise.all([
       Seller.find(query)
         // Never leak OTP/auth internals to the client
-        .select("-otpHash -otpAttempts -otpExpiresAt -otpLastSentAt")
+        .select(HIDDEN_FIELDS)
         .sort({ [sortBy]: sortDir })
         .skip(skip)
         .limit(limitNum),
@@ -80,6 +83,7 @@ exports.getSellers = async (req, res) => {
     return res.status(500).json({ success: false, message: "Could not fetch sellers." });
   }
 };
+
 exports.checkPincode = async (req, res) => {
   try {
     const { pincode, city } = req.query;
@@ -125,7 +129,7 @@ exports.checkPincode = async (req, res) => {
     if (count === 0 && cleanCity) {
       count = await Seller.countDocuments({
         ...baseFilter,
-        city: { $regex: `^${cleanCity}$`, $options: "i" },
+        city: { $regex: `^${escapeRegex(cleanCity)}$`, $options: "i" },
       });
 
       if (count > 0) {
@@ -149,12 +153,11 @@ exports.checkPincode = async (req, res) => {
     });
   }
 };
+
 // ─── GET /api/sellers/:id ──────────────────────────────────────────────────
 exports.getSellerById = async (req, res) => {
   try {
-    const seller = await Seller.findById(req.params.id).select(
-      "-otpHash -otpAttempts -otpExpiresAt -otpLastSentAt"
-    );
+    const seller = await Seller.findById(req.params.id).select(HIDDEN_FIELDS);
     if (!seller) {
       return res.status(404).json({ success: false, message: "Seller not found." });
     }
@@ -162,6 +165,133 @@ exports.getSellerById = async (req, res) => {
   } catch (err) {
     console.error("getSellerById error:", err);
     return res.status(500).json({ success: false, message: "Could not fetch seller." });
+  }
+};
+
+// ─── PUT /api/seller/:id/details  (ADMIN ONLY) ─────────────────────────────
+// Lets an admin edit a seller's profile, status flags and ledger counters.
+// Only whitelisted fields are ever written, so OTP/auth internals, _id and
+// createdAt can't be changed through this endpoint.
+const STRING_FIELDS = [
+  "name",
+  "email",
+  "businessPhone",
+  "emergencyPhone",
+  "state",
+  "city",
+  "address",
+  "pincode",
+  "description",
+];
+const BOOLEAN_FIELDS = [
+  "approved",
+  "blocked",
+  "verified",
+  "phoneVerified",
+  "isPremium",
+  "isOnline",
+  "isAllocated",
+];
+const NUMBER_FIELDS = [
+  "rating",
+  "completedBookings",
+  "paidBookingsCount",
+  "totalPaymentsReceived",
+];
+const REQUIRED_STRING_FIELDS = ["name", "email", "businessPhone", "state", "city", "address", "pincode"];
+
+exports.updateSellerDetails = async (req, res) => {
+  try {
+    const seller = await Seller.findById(req.params.id);
+    if (!seller) {
+      return res.status(404).json({ success: false, message: "Seller not found." });
+    }
+
+    const body = req.body || {};
+    const updates = {};
+
+    // ── Strings ──
+    for (const field of STRING_FIELDS) {
+      if (body[field] === undefined) continue;
+      let value = String(body[field]).trim();
+      if (field === "email") value = value.toLowerCase();
+
+      if (REQUIRED_STRING_FIELDS.includes(field) && !value) {
+        return res.status(400).json({ success: false, message: `${field} cannot be empty.` });
+      }
+      updates[field] = value;
+    }
+
+    if (updates.email && !/^\S+@\S+\.\S+$/.test(updates.email)) {
+      return res.status(400).json({ success: false, message: "Enter a valid email address." });
+    }
+    if (updates.pincode && !/^[1-9][0-9]{5}$/.test(updates.pincode)) {
+      return res.status(400).json({ success: false, message: "Enter a valid 6-digit pincode." });
+    }
+
+    // ── Booleans ──
+    for (const field of BOOLEAN_FIELDS) {
+      if (body[field] === undefined) continue;
+      updates[field] = body[field] === true || body[field] === "true";
+    }
+
+    // ── Numbers ──
+    for (const field of NUMBER_FIELDS) {
+      if (body[field] === undefined) continue;
+      const num = Number(body[field]);
+      if (isNaN(num) || num < 0) {
+        return res.status(400).json({ success: false, message: `${field} must be a number, 0 or more.` });
+      }
+      if (field === "rating" && num > 5) {
+        return res.status(400).json({ success: false, message: "Rating must be between 0 and 5." });
+      }
+      updates[field] = num;
+    }
+
+    // ── Uniqueness checks (email + login phone), excluding this seller ──
+    if (updates.email && updates.email !== seller.email) {
+      const emailTaken = await Seller.exists({ email: updates.email, _id: { $ne: seller._id } });
+      if (emailTaken) {
+        return res.status(409).json({ success: false, message: "Another seller already uses this email." });
+      }
+    }
+    if (updates.businessPhone && updates.businessPhone !== seller.businessPhone) {
+      const phoneTaken = await Seller.exists({
+        businessPhone: updates.businessPhone,
+        _id: { $ne: seller._id },
+      });
+      if (phoneTaken) {
+        return res.status(409).json({ success: false, message: "Another seller already uses this business phone." });
+      }
+      // A new login number hasn't been OTP-verified yet, unless the admin explicitly says so
+      if (body.phoneVerified === undefined) updates.phoneVerified = false;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, message: "No valid fields to update." });
+    }
+
+    const updated = await Seller.findByIdAndUpdate(
+      seller._id,
+      { $set: updates },
+      { new: true, runValidators: true }
+    ).select(HIDDEN_FIELDS);
+
+    return res.json({ success: true, message: "Vendor updated.", seller: updated });
+  } catch (err) {
+    console.error("updateSellerDetails error:", err);
+
+    // Mongo duplicate key (race condition on unique email / businessPhone)
+    if (err.code === 11000) {
+      const field = Object.keys(err.keyPattern || {})[0] || "field";
+      return res.status(409).json({ success: false, message: `That ${field} is already in use.` });
+    }
+    // Mongoose schema validation errors
+    if (err.name === "ValidationError") {
+      const first = Object.values(err.errors)[0];
+      return res.status(400).json({ success: false, message: first?.message || "Validation failed." });
+    }
+    return res.status(500).json({ success: false, message: "Could not update seller." });
   }
 };
 
