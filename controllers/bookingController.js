@@ -6,6 +6,7 @@ const Booking = require("../models/Booking");
 const axios = require("axios");
 const sharp = require("sharp");
 const FormData = require("form-data");
+const { releaseSeller } = require("../utils/sellerAvailability");
 
 exports.initWhatsApp = () => {
   console.log("ℹ️ initWhatsApp() called — WhatsApp messages are sent via Meta Graph API.");
@@ -20,6 +21,10 @@ const APP_BASE_URL                 = process.env.APP_BASE_URL || "https://decory
 const API_BASE_URL                 = process.env.API_BASE_URL || "https://api.decoryy.com/api/bookings";
 const TRACKING_TOKEN_SECRET        = process.env.TRACKING_TOKEN_SECRET;
 const TRACKING_TOKEN_EXPIRY        = process.env.TRACKING_TOKEN_EXPIRY || "24h";
+
+// Setup photos a vendor must upload before a job can be marked complete
+const MIN_COMPLETION_IMAGES = 1; // keep in sync with the frontend
+const MAX_COMPLETION_IMAGES = 8;
 
 // Statuses that mean "this job is decided, stop offering it to other sellers"
 const ACTIVE_STATUSES = ["seller_assigned", "accepted", "cancelled", "completed"];
@@ -389,6 +394,9 @@ exports.createInstantBooking = async (req, res) => {
 };
 
 // ─── Seller accept booking ────────────────────────────────────────────────────
+// Accepting marks the seller as busy (isAllocated = true) inside the same
+// transaction that assigns the booking. They stay busy until the booking is
+// completed (with photos) or cancelled.
 
 exports.acceptBooking = async (req, res) => {
   const session = await mongoose.startSession();
@@ -495,30 +503,106 @@ exports.rejectBooking = async (req, res) => {
   }
 };
 
-// ─── Complete booking ─────────────────────────────────────────────────────────
+// ─── Seller uploads setup photos ──────────────────────────────────────────────
+// Photos do NOT free the seller. They only unlock "Mark Complete".
+
+exports.uploadCompletionImages = async (req, res) => {
+  try {
+    const { bookingId } = req.params;
+    const sellerId = req.seller.id;
+    const files = req.files || [];
+
+    if (!isValidObjectId(bookingId)) {
+      return res.status(400).json({ success: false, message: "Invalid booking ID." });
+    }
+    if (files.length === 0) {
+      return res.status(400).json({ success: false, message: "Please select at least one photo." });
+    }
+
+    const booking = await Booking.findOne({ _id: bookingId, sellerId, status: "seller_assigned" })
+      .select("completionImages");
+    if (!booking) {
+      return res.status(404).json({ success: false, message: "Active booking not found for your account." });
+    }
+
+    if (booking.completionImages.length + files.length > MAX_COMPLETION_IMAGES) {
+      return res.status(400).json({
+        success: false,
+        message: `You can upload up to ${MAX_COMPLETION_IMAGES} photos per booking.`,
+      });
+    }
+
+    const newImages = files.map((f) => ({
+      url: f.path,
+      public_id: f.filename,
+      uploadedAt: new Date(),
+    }));
+
+    const updated = await Booking.findOneAndUpdate(
+      { _id: bookingId, sellerId, status: "seller_assigned" },
+      { $push: { completionImages: { $each: newImages } } },
+      { new: true }
+    ).select("completionImages");
+
+    if (!updated) {
+      return res.status(409).json({ success: false, message: "This booking is no longer active." });
+    }
+
+    return res.json({
+      success: true,
+      completionImages: updated.completionImages,
+      canComplete: updated.completionImages.length >= MIN_COMPLETION_IMAGES,
+    });
+  } catch (err) {
+    console.error("uploadCompletionImages error:", err);
+    return res.status(500).json({ success: false, message: "Could not upload photos." });
+  }
+};
+
+// ─── Complete booking (photos required) ───────────────────────────────────────
 
 exports.completeBooking = async (req, res) => {
   try {
     const { bookingId } = req.params;
+    const sellerId = req.seller.id;
 
     if (!isValidObjectId(bookingId)) {
       return res.status(400).json({ success: false, message: "Invalid booking ID." });
     }
 
+    // Single atomic update: right seller, right status, and enough photos.
     const booking = await Booking.findOneAndUpdate(
-      { _id: bookingId, status: "seller_assigned" },
+      {
+        _id: bookingId,
+        sellerId,
+        status: "seller_assigned",
+        [`completionImages.${MIN_COMPLETION_IMAGES - 1}`]: { $exists: true },
+      },
       { status: "completed", completedAt: new Date() },
       { new: true }
     );
 
     if (!booking) {
-      return res.status(404).json({ success: false, message: "Booking not found or cannot be completed." });
+      // Work out why, so the seller gets a useful message
+      const existing = await Booking.findOne({ _id: bookingId, sellerId }).select("status");
+      if (!existing) {
+        return res.status(404).json({ success: false, message: "Booking not found for your account." });
+      }
+      if (existing.status !== "seller_assigned") {
+        return res.status(409).json({
+          success: false,
+          message: `This booking is ${existing.status.replace(/_/g, " ")} and can't be completed.`,
+        });
+      }
+      return res.status(400).json({
+        success: false,
+        code: "IMAGES_REQUIRED",
+        message: `Upload at least ${MIN_COMPLETION_IMAGES} photo(s) of the finished setup before marking this job complete.`,
+      });
     }
 
-    await Seller.findByIdAndUpdate(booking.sellerId, {
-      isAllocated: false,
-      $inc: { completedBookings: 1 },
-    });
+    // Booking is saved as completed, so it's safe to free the seller now
+    await releaseSeller(sellerId, { countCompleted: true });
 
     return res.json({ success: true, booking });
   } catch (err) {
@@ -527,7 +611,7 @@ exports.completeBooking = async (req, res) => {
   }
 };
 
-// ─── Seller cancel booking ────────────────────────────────────────────────────
+// ─── Seller cancel (drop) booking ─────────────────────────────────────────────
 
 exports.sellerCancelBooking = async (req, res) => {
   try {
@@ -535,24 +619,35 @@ exports.sellerCancelBooking = async (req, res) => {
     const { cancellationReason } = req.body;
     const sellerId               = req.seller.id;
 
-    const booking = await Booking.findOne({ _id: bookingId, sellerId });
+    if (!isValidObjectId(bookingId)) {
+      return res.status(400).json({ success: false, message: "Invalid booking ID." });
+    }
+
+    const booking = await Booking.findOneAndUpdate(
+      { _id: bookingId, sellerId, status: "seller_assigned" },
+      {
+        status: "cancelled",
+        cancelledAt: new Date(),
+        cancellationReason: cancellationReason || "Cancelled by decorator.",
+        notifiedSellerId: null,
+        offerExpiresAt: null,
+      },
+      { new: true }
+    );
+
     if (!booking) {
-      return res.status(404).json({ success: false, message: "Booking not found for your account." });
+      const existing = await Booking.findOne({ _id: bookingId, sellerId }).select("status");
+      if (!existing) {
+        return res.status(404).json({ success: false, message: "Booking not found for your account." });
+      }
+      return res.status(409).json({
+        success: false,
+        message: `This booking is already ${existing.status.replace(/_/g, " ")}.`,
+      });
     }
 
-    if (booking.status === "completed") {
-      return res.status(400).json({ success: false, message: "Completed bookings cannot be cancelled." });
-    }
-
-    booking.status              = "cancelled";
-    booking.cancellationDetails = {
-      cancelledBy: "seller",
-      reason: cancellationReason || "Cancelled by decorator.",
-      timestamp: new Date(),
-    };
-    await booking.save();
-
-    await Seller.findByIdAndUpdate(sellerId, { isAllocated: false });
+    // Available again immediately
+    await releaseSeller(sellerId);
 
     return res.json({ success: true, message: "Booking cancelled successfully." });
   } catch (err) {
@@ -581,7 +676,7 @@ exports.cancelBooking = async (req, res) => {
       return res.status(409).json({ success: false, message: `This booking is already ${booking.status}.` });
     }
 
-    const hadSeller = booking.status === "seller_assigned" && booking.sellerId;
+    const hadSeller = booking.sellerId && ["seller_assigned", "accepted"].includes(booking.status);
 
     booking.status             = "cancelled";
     booking.cancelledAt        = new Date();
@@ -591,7 +686,8 @@ exports.cancelBooking = async (req, res) => {
     await booking.save();
 
     if (hadSeller) {
-      await Seller.findByIdAndUpdate(booking.sellerId, { isAllocated: false });
+      // Available again immediately
+      await releaseSeller(booking.sellerId);
     }
 
     return res.json({ success: true, booking });
@@ -986,7 +1082,7 @@ const successPage = (booking, seller) => {
       <a class="link" href="${esc(productUrl)}" target="_blank" rel="noopener">View package details</a>
     </div>
 
-    <p class="note">You won't receive new requests until this booking is marked complete.</p>
+    <p class="note">You won't receive new requests until you upload setup photos and mark this booking complete.</p>
     `,
     "Booking confirmed · Decoryy Partner"
   );

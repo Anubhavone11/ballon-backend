@@ -7,7 +7,7 @@ const bookingController = require("../controllers/bookingController");
 const userAuth = require("../middleware/userAuth");      // For regular customers/buyers
 const { auth } = require("../middleware/auth");
 const sellerAuth = require("../middleware/sellerAuth");  // For venue owners/partners
-
+const { uploadBookingPhotos } = require('../middleware/uploadBookingPhotos');
 // ─── IMPORTANT: Express matches routes top-to-bottom, first match wins. ───────
 // Every literal/specific path (e.g. "/accept/:bookingId", "/user/history")
 // MUST be declared BEFORE the generic "/:bookingId" wildcard route further
@@ -49,7 +49,7 @@ router.patch(
   userAuth,
   bookingController.cancelBooking
 );
-
+   router.post('/completion-images/:bookingId', sellerAuth, uploadBookingPhotos, bookingController.uploadCompletionImages);
 // --- SELLER PARTNER ENDPOINTS ---
 
 // FIX 1: .get instead of .patch so clicking the link from WhatsApp works instantly.

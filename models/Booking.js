@@ -180,6 +180,16 @@ const bookingSchema = new mongoose.Schema(
       default: ""
     },
 
+    // 📸 Photos of the finished setup, uploaded by the vendor.
+    // The job can't be marked complete until at least one exists.
+    completionImages: [
+      {
+        url: { type: String, required: true },
+        public_id: { type: String, default: "" },
+        uploadedAt: { type: Date, default: Date.now }
+      }
+    ],
+
     sellerFeedback: {
       type: String,
       default: ""
@@ -215,6 +225,7 @@ bookingSchema.index({ bookingType: 1 });
 bookingSchema.index({ createdAt: -1 });
 bookingSchema.index({ scheduledTime: 1 });
 bookingSchema.index({ status: 1, offerExpiresAt: 1 });
+bookingSchema.index({ sellerId: 1, status: 1 });
 bookingSchema.index({ "pickupLocation.state": 1 });
 bookingSchema.index({ "pickupLocation.city": 1 });
 bookingSchema.index({ "pickupLocation.state": 1, "pickupLocation.city": 1 });

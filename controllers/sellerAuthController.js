@@ -8,6 +8,9 @@ const OTP_TTL_MS = 5 * 60 * 1000;      // OTP valid for 5 minutes
 const OTP_RESEND_COOLDOWN_MS = 60 * 1000; // 1 resend per 60s
 const MAX_OTP_ATTEMPTS = 5;
 
+// Booking statuses that mean the seller is still on a live job
+const LIVE_BOOKING_STATUSES = ['seller_assigned', 'accepted'];
+
 const hashOtp = (otp, businessPhone) =>
   crypto.createHash('sha256').update(`${otp}:${businessPhone}`).digest('hex');
 
@@ -271,10 +274,29 @@ exports.getSellerAssignedBookings = async (req, res) => {
   }
 };
 
+// Manual Busy / Available switch.
+// A seller on a live booking can NOT flip themselves to Available: they are
+// freed only by completing the job (with photos) or by a cancellation.
 exports.toggleAllocationStatus = async (req, res) => {
   try {
     const seller = await Seller.findById(req.seller._id);
     if (!seller) return res.status(404).json({ success: false, message: 'Not found' });
+
+    if (seller.isAllocated) {
+      const liveJob = await Booking.exists({
+        sellerId: seller._id,
+        status: { $in: LIVE_BOOKING_STATUSES }
+      });
+
+      if (liveJob) {
+        return res.status(409).json({
+          success: false,
+          isAllocated: true,
+          message: 'You have a live booking. Upload photos and mark it complete to become available again.'
+        });
+      }
+    }
+
     seller.isAllocated = !seller.isAllocated;
     await seller.save();
     return res.status(200).json({ success: true, isAllocated: seller.isAllocated });
