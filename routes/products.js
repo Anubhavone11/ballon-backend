@@ -24,13 +24,17 @@ const storage = new CloudinaryStorage({
   params: {
     folder: 'decoryy/products',
     allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp'],
+    format: 'webp', // convert everything to WebP
+    transformation: [
+      { width: 1000, height: 1000, crop: 'fill', gravity: 'auto' }, // square crop, smart focus
+      { quality: 'auto:good' }                                       // automatic compression
+    ],
     public_id: (req, file) => {
       const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
       return 'product-' + uniqueSuffix;
     }
   },
 });
-
 // Configure multer
 const upload = multer({
   storage: storage,
@@ -62,16 +66,31 @@ const uploadFields = upload.fields([
 
 // Middleware to handle multer upload
 const handleUpload = (req, res, next) => {
+  console.log('📥 [UPLOAD] Incoming', req.method, req.originalUrl);
+
   uploadFields(req, res, function (err) {
     if (err instanceof multer.MulterError) {
+      console.error('❌ [UPLOAD] MulterError:', err.code, err.message);
       return res.status(400).json({ error: 'File upload error', details: err.message });
     } else if (err) {
+      console.error('❌ [UPLOAD] Error:', err.message);
       return res.status(500).json({ error: 'File upload error', details: err.message });
     }
+
+    const all = Object.values(req.files || {}).flat();
+    console.log(`✅ [UPLOAD] ${all.length} file(s) uploaded to Cloudinary`);
+    all.forEach(f => {
+      console.log(`   • ${f.fieldname}`, {
+        originalName: f.originalname,
+        originalMime: f.mimetype,
+        sizeKB: f.size ? Math.round(f.size / 1024) : 'n/a',
+        url: f.path,
+        isWebp: /\.webp$/i.test(f.path || '')
+      });
+    });
     next();
   });
 };
-
 // multer-storage-cloudinary already sets file.path to the full Cloudinary CDN URL,
 // so no manual path-to-URL transform is needed anymore. Kept as a no-op pass-through
 // in case other code still references this middleware name.

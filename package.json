@@ -35,7 +35,7 @@
     "qrcode-terminal": "^0.12.0",
     "razorpay": "^2.9.6",
     "react-responsive-carousel": "^3.2.23",
-    "sharp": "^0.35.4",
+    "sharp": "^0.35.5",
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3",
     "twilio": "^6.0.2",

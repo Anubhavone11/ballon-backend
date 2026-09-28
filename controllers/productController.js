@@ -1,20 +1,32 @@
 const Product = require('../models/Product');
 const Category = require('../models/Category');
 const mongoose = require('mongoose');
-const fs = require('fs').promises;
-const path = require('path');
 const { getCache, setCache, clearCache } = require('../utils/serverCache');
 
 // Fields the shop grid / filters actually need. Admin edit forms still get
-// the full document (adminView=true skips this projection). Trimming the
-// payload here is most of the "send less data" win — no extra request
-// needed, the response itself just gets smaller.
+// the full document (adminView=true skips this projection).
 const LIST_PROJECTION =
   'name price regularPrice image images category subCategory rating ' +
   'date createdAt isInstantAvailable instantDeliveryTime tags stock ' +
   'inStock isBestSeller isTrending isMostLoved cityPrices';
 
 const LIST_CACHE_TTL_MS = 60_000; // tune to how often you edit the catalog
+
+/**
+ * Safety net for image optimization.
+ * - If Cloudinary already converted the upload to .webp, the URL is returned as is.
+ * - Otherwise, the URL is rewritten so Cloudinary serves a 1000x1000 auto-cropped,
+ *   auto-compressed WebP version.
+ */
+const optimizeUrl = (url) => {
+  if (!url || typeof url !== 'string') return url;
+  if (!url.includes('res.cloudinary.com') || !url.includes('/upload/')) return url;
+  if (/\.webp$/i.test(url)) return url;
+  if (url.includes('/upload/c_fill')) return url;
+  return url
+    .replace('/upload/', '/upload/c_fill,g_auto,w_1000,h_1000,q_auto/')
+    .replace(/\.(png|jpe?g|gif)$/i, '.webp');
+};
 
 /**
  * @desc Get all products (supports optional query filters: category, subCategory, limit, search, city, page, instant)
@@ -131,8 +143,6 @@ const getAllProducts = async (req, res) => {
     const [totalCount, products] = await Promise.all([
       Product.countDocuments(query),
       productsQuery
-      // ^ No more manual populate-in-a-loop here — .populate() above does it
-      //   in a single extra query per relation instead of one query PER PRODUCT.
     ]);
 
     // City price override
@@ -241,13 +251,6 @@ const getInstantProducts = async (req, res) => {
     return res.status(500).json({ success: false, message: "Error fetching instant products", error: error.message });
   }
 };
-
-// ---------------------------------------------------------------------
-// Everything below is unchanged from your original file, EXCEPT that
-// create/update/delete now call clearCache('products:') and
-// clearCache('instant:') so a new/edited product shows up immediately
-// instead of waiting out the cache TTL.
-// ---------------------------------------------------------------------
 
 const getSearchSuggestions = async (req, res) => {
   try {
@@ -443,8 +446,9 @@ const getSearchSuggestions = async (req, res) => {
 };
 
 const getProductsBySection = async (req, res) => {
+  // declared outside try so the catch block can use it
+  const { section } = req.params;
   try {
-    const { section } = req.params;
     const { city } = req.query;
 
     const cacheKey = `section:${section}:${JSON.stringify(req.query)}`;
@@ -582,7 +586,11 @@ const getProduct = async (req, res) => {
 
 const createProductWithFiles = async (req, res) => {
   try {
+    console.log('🆕 [CREATE] Body keys:', Object.keys(req.body));
+    console.log('🆕 [CREATE] File fields:', Object.keys(req.files || {}));
+
     if (!req.files || !req.files.mainImage) {
+      console.warn('⚠️ [CREATE] Rejected: main image missing');
       return res.status(400).json({
         error: 'Main image is required.',
         message: 'Please upload a main image for the product'
@@ -600,6 +608,7 @@ const createProductWithFiles = async (req, res) => {
     const missingFields = requiredFields.filter(field => !productData[field]);
 
     if (missingFields.length > 0) {
+      console.warn('⚠️ [CREATE] Rejected: missing fields', missingFields);
       return res.status(400).json({ error: `Missing required fields: ${missingFields.join(', ')}` });
     }
 
@@ -621,13 +630,18 @@ const createProductWithFiles = async (req, res) => {
 
     const imagePaths = [];
     if (files.mainImage && files.mainImage[0]) {
-      imagePaths.push(files.mainImage[0].path);
+      imagePaths.push(optimizeUrl(files.mainImage[0].path));
     }
     for (let i = 1; i <= 9; i++) {
       if (files[`image${i}`] && files[`image${i}`][0]) {
-        imagePaths.push(files[`image${i}`][0].path);
+        imagePaths.push(optimizeUrl(files[`image${i}`][0].path));
       }
     }
+
+    console.log('🖼️ [CREATE] Final image URLs to save:', imagePaths);
+    imagePaths.forEach((p, i) => {
+      if (!/\.webp$/i.test(p)) console.warn(`⚠️ [CREATE] Image ${i} is NOT webp:`, p);
+    });
 
     const productObject = {
       name: productData.name,
@@ -659,6 +673,12 @@ const createProductWithFiles = async (req, res) => {
     const newProduct = new Product(productObject);
     const savedProduct = await newProduct.save();
 
+    console.log('💾 [CREATE] Saved product', savedProduct._id.toString(), {
+      name: savedProduct.name,
+      image: savedProduct.image,
+      imageCount: savedProduct.images.length
+    });
+
     // Invalidate list caches so this product appears immediately
     clearCache('products:');
     clearCache('instant:');
@@ -669,7 +689,7 @@ const createProductWithFiles = async (req, res) => {
       product: savedProduct,
     });
   } catch (error) {
-    console.error('=== Error creating product ===');
+    console.error('=== Error creating product ===', error.message);
     if (error.name === 'ValidationError') {
       const validationErrors = Object.values(error.errors).map(err => err.message);
       return res.status(400).json({ message: "Validation Error", error: validationErrors.join(', ') });
@@ -684,6 +704,8 @@ const updateProductWithFiles = async (req, res) => {
     const files = req.files || {};
     const productData = req.body;
 
+    console.log('✏️ [UPDATE] Product', id, '| file fields:', Object.keys(files));
+
     const existingProduct = await Product.findById(id);
     if (!existingProduct) {
       return res.status(404).json({ message: "Product not found" });
@@ -695,14 +717,16 @@ const updateProductWithFiles = async (req, res) => {
     }
 
     if (files.mainImage && files.mainImage[0]) {
-      imagePaths[0] = files.mainImage[0].path;
+      imagePaths[0] = optimizeUrl(files.mainImage[0].path);
     }
 
     for (let i = 1; i <= 9; i++) {
       if (files[`image${i}`] && files[`image${i}`][0]) {
-        imagePaths[i] = files[`image${i}`][0].path;
+        imagePaths[i] = optimizeUrl(files[`image${i}`][0].path);
       }
     }
+
+    console.log('🖼️ [UPDATE] Final image URLs:', imagePaths);
 
     const updatedProductData = {
       name: productData.name || existingProduct.name,
