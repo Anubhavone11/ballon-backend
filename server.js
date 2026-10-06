@@ -281,20 +281,10 @@ async function startServer() {
     app.use('/api/auth', authLimiter, authRoutes);
     app.use('/api/admin/auth', authLimiter, adminAuthRoutes);
 
-    // Nested route: /api/categories/:categoryId/subcategories  (fixes the 404s)
-    // Must be registered BEFORE the /api/categories mount.
-    // Assumes subCategoryRoutes supports GET /?category=<id>. Adjust if different.
-    app.get(
-      '/api/categories/:categoryId/subcategories',
-      cacheMiddleware(300),
-      (req, res, next) => {
-        req.url = `/?category=${req.params.categoryId}`;
-        subCategoryRoutes(req, res, next);
-      }
-    );
-
     // High-Read Cached Routes
     app.use('/api/categories', cacheMiddleware(300), categoryRoutes);       // 5 mins
+    // Original mount: serves /api/categories/:id/subcategories (cache above already wraps it)
+    app.use('/api/categories', subCategoryRoutes);
     app.use('/api/subcategories', cacheMiddleware(300), subCategoryRoutes);
     app.use('/api/banners', cacheMiddleware(300), bannerRoutes);
     app.use('/api/hero-carousel', cacheMiddleware(300), heroCarouselRoutes);
@@ -326,6 +316,9 @@ async function startServer() {
     app.use('/api/bookings', bookingRoutes);
     app.use('/api/voice-gateway', voiceRoutes);
     app.use('/api/chat', chatRoutes);
+
+    // Original catch-all mount for subCategoryRoutes (must stay LAST among /api routes)
+    app.use('/api', subCategoryRoutes);
 
     // Global error handler
     app.use((err, req, res, next) => {
