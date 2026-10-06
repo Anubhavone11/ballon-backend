@@ -14,9 +14,9 @@ const { RedisStore } = require('rate-limit-redis');
 const shopRoutes = require('./routes/shop');
 const productRoutes = require('./routes/products');
 const orderRoutes = require('./routes/orders');
-const authRoutes = require('./routes/auth'); 
-const adminAuthRoutes = require('./routes/adminAuth'); 
-const lovedRoutes = require('./routes/loved'); 
+const authRoutes = require('./routes/auth');
+const adminAuthRoutes = require('./routes/adminAuth');
+const lovedRoutes = require('./routes/loved');
 const categoryRoutes = require('./routes/category');
 const featuredProductRoutes = require('./routes/featuredProduct');
 const bestSellerRoutes = require('./routes/bestSeller');
@@ -25,7 +25,7 @@ const cartRoutes = require('./routes/cart');
 const heroCarouselRoutes = require('./routes/heroCarousel');
 const sellerRoutes = require('./routes/seller');
 const couponRoutes = require('./routes/coupon');
-const subCategoryRoutes = require('./routes/subCategoryRoutes'); 
+const subCategoryRoutes = require('./routes/subCategoryRoutes');
 const blogRoutes = require('./routes/blog');
 const videoRoutes = require('./routes/video');
 const adminBookingRoutes = require('./routes/adminBookingRoutes');
@@ -36,7 +36,7 @@ const addonRoutes = require('./routes/addon');
 
 // Controllers & Global Services
 const settingsController = require('./controllers/settingsController');
-const { initSocket } = require('./socket/socketSetup'); 
+const { initSocket } = require('./socket/socketSetup');
 const { startMatchmakingSweep } = require('./controllers/Matchmakingsweep');
 
 const app = express();
@@ -82,12 +82,11 @@ const cacheMiddleware = (durationInSeconds = 300) => {
       res.json = (body) => {
         if (res.statusCode >= 200 && res.statusCode < 300) {
           const stringified = JSON.stringify(body);
-          
+
           redisClient.setEx(cacheKey, durationInSeconds, stringified)
             .then(() => {
-              // Log key, TTL, and payload sample
-              const preview = stringified.length > 150 
-                ? stringified.substring(0, 150) + '... (truncated)' 
+              const preview = stringified.length > 150
+                ? stringified.substring(0, 150) + '... (truncated)'
                 : stringified;
 
               console.log(`[REDIS STORED] Key: "${cacheKey}" | TTL: ${durationInSeconds}s | Size: ${stringified.length} bytes`);
@@ -119,7 +118,7 @@ if (!process.env.JWT_SECRET_SELLER) {
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:5174',
-  'http://localhost:5175', 
+  'http://localhost:5175',
   'https://www.decoryy.com',
   'https://ballon-frontend.vercel.app',
   'https://ballon-admin-beta.vercel.app',
@@ -127,6 +126,8 @@ const allowedOrigins = [
   'https://ballon-frontend-psi.vercel.app'
 ];
 
+// cors() alone handles headers + preflight. The old duplicate manual
+// header middleware has been removed.
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin || allowedOrigins.includes(origin)) {
@@ -137,26 +138,11 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin', 'Access-Control-Allow-Origin', 'Content-Length'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin', 'Content-Length'],
   exposedHeaders: ['Content-Length', 'X-Requested-With'],
   preflightContinue: false,
   optionsSuccessStatus: 204
 }));
-
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (allowedOrigins.includes(origin)) {
-    res.header('Access-Control-Allow-Origin', origin);
-  }
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Content-Length');
-  res.header('Access-Control-Allow-Credentials', 'true');
-  if (req.method === 'OPTIONS') {
-    res.sendStatus(200);
-  } else {
-    next();
-  }
-});
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
@@ -176,7 +162,7 @@ app.use((err, req, res, next) => {
 // Ensure data directories exist
 const dataDir = path.join(__dirname, 'data');
 const userProductDir = path.join(dataDir, 'userproduct');
-const productUploadsDir = path.join(dataDir, 'products'); 
+const productUploadsDir = path.join(dataDir, 'products');
 const sellerProfilesDir = path.join(dataDir, 'seller-profiles');
 
 [dataDir, userProductDir, productUploadsDir, sellerProfilesDir].forEach(dir => {
@@ -249,12 +235,13 @@ async function startServer() {
     console.log('Connecting to Redis...');
     await redisClient.connect();
 
-    // 2. Redis-backed Rate Limiters with Logging
+    // 2. Redis-backed Rate Limiters (lenient)
     const globalLimiter = rateLimit({
       windowMs: 15 * 60 * 1000,
-      max: 300,
+      max: 1500,                       // was 300
       standardHeaders: true,
       legacyHeaders: false,
+      skip: (req) => req.method === 'OPTIONS',
       store: new RedisStore({
         sendCommand: (...args) => redisClient.sendCommand(args),
         prefix: 'rl:global:'
@@ -263,14 +250,15 @@ async function startServer() {
         console.warn(`[RATE LIMIT EXCEEDED] IP: ${req.ip} exceeded general limit on ${req.originalUrl}`);
         res.status(429).json({
           success: false,
-          message: 'Too many requests from this IP. Please try again after 15 minutes.'
+          message: 'Too many requests. Please try again in a few minutes.'
         });
       }
     });
 
     const authLimiter = rateLimit({
       windowMs: 15 * 60 * 1000,
-      max: 10,
+      max: 50,                         // was 10
+      skipSuccessfulRequests: true,    // only failed attempts count
       standardHeaders: true,
       legacyHeaders: false,
       store: new RedisStore({
@@ -281,7 +269,7 @@ async function startServer() {
         console.warn(`[AUTH LIMIT EXCEEDED] IP: ${req.ip} exceeded auth attempts on ${req.originalUrl}`);
         res.status(429).json({
           success: false,
-          message: 'Too many authentication attempts. Please try again in 15 minutes.'
+          message: 'Too many failed attempts. Please try again in a few minutes.'
         });
       }
     });
@@ -292,6 +280,18 @@ async function startServer() {
     // 4. Attach Routes
     app.use('/api/auth', authLimiter, authRoutes);
     app.use('/api/admin/auth', authLimiter, adminAuthRoutes);
+
+    // Nested route: /api/categories/:categoryId/subcategories  (fixes the 404s)
+    // Must be registered BEFORE the /api/categories mount.
+    // Assumes subCategoryRoutes supports GET /?category=<id>. Adjust if different.
+    app.get(
+      '/api/categories/:categoryId/subcategories',
+      cacheMiddleware(300),
+      (req, res, next) => {
+        req.url = `/?category=${req.params.categoryId}`;
+        subCategoryRoutes(req, res, next);
+      }
+    );
 
     // High-Read Cached Routes
     app.use('/api/categories', cacheMiddleware(300), categoryRoutes);       // 5 mins
@@ -305,7 +305,7 @@ async function startServer() {
 
     // Dynamic & Non-cached Routes
     app.use('/api/activity-tracking', require('./routes/Activityroutes'));
-    app.use('/api/shop', productRoutes); 
+    app.use('/api/shop', productRoutes);
     app.use('/api/products', productRoutes);
     app.use('/api/orders', orderRoutes);
     app.use('/api/admin/bookings', adminBookingRoutes);
@@ -339,14 +339,10 @@ async function startServer() {
     // 5. Connect MongoDB
     console.log('Connecting to MongoDB...');
     await mongoose.connect(MONGODB_URI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-      serverSelectionTimeoutMS: 15000, 
+      serverSelectionTimeoutMS: 15000,
       socketTimeoutMS: 45000,
     });
     console.log('MongoDB connected successfully');
-
-    console.log('WhatsApp client initializing...');
 
     try {
       await settingsController.initializeDefaultSettings();
@@ -365,7 +361,7 @@ async function startServer() {
     });
   } catch (error) {
     console.error('Failed to start server:', error);
-    process.exit(1); 
+    process.exit(1);
   }
 }
 
