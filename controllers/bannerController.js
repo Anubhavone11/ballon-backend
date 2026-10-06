@@ -1,8 +1,26 @@
 // File: admin/backend/controllers/bannerController.js
 const Banner = require("../models/Banner");
-const cloudinary = require("../config/cloudinary"); // Import cloudinary directly to handle deletions
+const cloudinary = require("../config/cloudinary");
 
 const VALID_TYPES = Banner.TYPES; // ['category', 'instant', 'promotion']
+
+/**
+ * Purge Redis cache keys for banners
+ */
+const purgeRedisBannerCache = async (req) => {
+  try {
+    const redis = req.app.get("redisClient");
+    if (!redis || !redis.isReady) return;
+
+    const keys = await redis.keys("cache:/api/banners*");
+    if (keys.length > 0) {
+      await redis.del(keys);
+      console.log(`[REDIS PURGED] Cleared ${keys.length} banner cache key(s)`);
+    }
+  } catch (err) {
+    console.error("[REDIS PURGE ERROR]", err.message);
+  }
+};
 
 // ------------------------------------------------------------------
 // CREATE  -> POST /api/banners
@@ -38,7 +56,6 @@ exports.createBanner = async (req, res) => {
       return res.status(400).json({ success: false, message: "Banner image is required" });
     }
 
-    // multer-storage-cloudinary automatically uploads the file and provides the URL in path and public_id in filename
     const imageUrl = req.file.path;
     const imagePublicId = req.file.filename;
 
@@ -58,9 +75,12 @@ exports.createBanner = async (req, res) => {
       endDate: endDate || null,
     });
 
+    // Invalidate Redis cache
+    await purgeRedisBannerCache(req);
+
     return res.status(201).json({ success: true, message: "Banner created successfully", data: banner });
   } catch (error) {
-    console.error("createBanner error:", error);
+    console.error("createBanner error:", error.message);
     return res.status(500).json({ success: false, message: "Failed to create banner", error: error.message });
   }
 };
@@ -90,7 +110,7 @@ exports.getBanners = async (req, res) => {
 
     return res.status(200).json({ success: true, count: banners.length, data: banners });
   } catch (error) {
-    console.error("getBanners error:", error);
+    console.error("getBanners error:", error.message);
     return res.status(500).json({ success: false, message: "Failed to fetch banners", error: error.message });
   }
 };
@@ -106,7 +126,7 @@ exports.getBannerById = async (req, res) => {
     }
     return res.status(200).json({ success: true, data: banner });
   } catch (error) {
-    console.error("getBannerById error:", error);
+    console.error("getBannerById error:", error.message);
     return res.status(500).json({ success: false, message: "Failed to fetch banner", error: error.message });
   }
 };
@@ -142,14 +162,10 @@ exports.updateBanner = async (req, res) => {
       });
     }
 
-    // If a new image was uploaded by multer, replace the old one
     if (req.file) {
-      // Delete the old image from Cloudinary
       if (banner.imagePublicId) {
         await cloudinary.uploader.destroy(banner.imagePublicId);
       }
-      
-      // Set new image data from multer-storage-cloudinary
       banner.image = req.file.path;
       banner.imagePublicId = req.file.filename;
     }
@@ -168,9 +184,12 @@ exports.updateBanner = async (req, res) => {
 
     await banner.save();
 
+    // Invalidate Redis cache
+    await purgeRedisBannerCache(req);
+
     return res.status(200).json({ success: true, message: "Banner updated successfully", data: banner });
   } catch (error) {
-    console.error("updateBanner error:", error);
+    console.error("updateBanner error:", error.message);
     return res.status(500).json({ success: false, message: "Failed to update banner", error: error.message });
   }
 };
@@ -185,16 +204,18 @@ exports.deleteBanner = async (req, res) => {
       return res.status(404).json({ success: false, message: "Banner not found" });
     }
 
-    // Delete image from Cloudinary
     if (banner.imagePublicId) {
       await cloudinary.uploader.destroy(banner.imagePublicId);
     }
     
     await banner.deleteOne();
 
+    // Invalidate Redis cache
+    await purgeRedisBannerCache(req);
+
     return res.status(200).json({ success: true, message: "Banner deleted successfully" });
   } catch (error) {
-    console.error("deleteBanner error:", error);
+    console.error("deleteBanner error:", error.message);
     return res.status(500).json({ success: false, message: "Failed to delete banner", error: error.message });
   }
 };
@@ -208,11 +229,16 @@ exports.toggleBannerStatus = async (req, res) => {
     if (!banner) {
       return res.status(404).json({ success: false, message: "Banner not found" });
     }
+    
     banner.isActive = !banner.isActive;
     await banner.save();
+
+    // Invalidate Redis cache
+    await purgeRedisBannerCache(req);
+
     return res.status(200).json({ success: true, message: "Banner status updated", data: banner });
   } catch (error) {
-    console.error("toggleBannerStatus error:", error);
+    console.error("toggleBannerStatus error:", error.message);
     return res.status(500).json({ success: false, message: "Failed to toggle banner status", error: error.message });
   }
 };

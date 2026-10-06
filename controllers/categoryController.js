@@ -1,36 +1,57 @@
 const Category = require('../models/Category');
-
 const SubCategory = require('../models/SubCategory');
+
+/**
+ * Purge Redis cache keys whenever category structures change
+ */
+const purgeRedisCategoryCache = async (req) => {
+  try {
+    const redis = req.app.get('redisClient');
+    if (!redis || !redis.isReady) return;
+
+    // Fetch keys for categories, subcategories, and affected product listings
+    const [categoryKeys, subCategoryKeys, productKeys] = await Promise.all([
+      redis.keys('cache:/api/categories*'),
+      redis.keys('cache:/api/subcategories*'),
+      redis.keys('cache:/api/products*')
+    ]);
+
+    const allKeys = [...new Set([...categoryKeys, ...subCategoryKeys, ...productKeys])];
+
+    if (allKeys.length > 0) {
+      await redis.del(allKeys);
+      console.log(`[REDIS PURGED] Cleared ${allKeys.length} category/product cache key(s)`);
+    }
+  } catch (err) {
+    console.error('[REDIS PURGE ERROR]', err.message);
+  }
+};
 
 // Get all categories for admin (including inactive ones)
 exports.getAllCategoriesAdmin = async (req, res) => {
   try {
     const { city } = req.query;
-    const query = {}; // No isActive filter for admin - show all categories
-    
-    // If city provided, filter by city (with backward compatibility)
+    const query = {};
+
     if (city) {
       const City = require('../models/City');
       const mongoose = require('mongoose');
       let cityId = null;
-      
+
       if (mongoose.Types.ObjectId.isValid(city)) {
         cityId = city;
       } else {
-        // Try to find city by name
         const cityDoc = await City.findOne({ name: new RegExp(`^${city}$`, 'i') });
         if (cityDoc) {
           cityId = cityDoc._id;
         }
       }
-      
+
       if (cityId) {
-        // Find ONLY categories that have this city in their cities array
-        // No backward compatibility - only show explicitly assigned categories
         query.cities = cityId;
       }
     }
-    
+
     const categories = await Category.find(query).sort({ sortOrder: 1, name: 1 });
     res.json({ categories });
   } catch (error) {
@@ -44,30 +65,26 @@ exports.getAllCategories = async (req, res) => {
   try {
     const { city } = req.query;
     const query = { isActive: true };
-    
-    // If city provided, filter by city (with backward compatibility)
+
     if (city) {
       const City = require('../models/City');
       const mongoose = require('mongoose');
       let cityId = null;
-      
+
       if (mongoose.Types.ObjectId.isValid(city)) {
         cityId = city;
       } else {
-        // Try to find city by name
         const cityDoc = await City.findOne({ name: new RegExp(`^${city}$`, 'i') });
         if (cityDoc) {
           cityId = cityDoc._id;
         }
       }
-      
+
       if (cityId) {
-        // Find ONLY categories that have this city in their cities array
-        // No backward compatibility - only show explicitly assigned categories
         query.cities = cityId;
       }
     }
-    
+
     const categories = await Category.find(query).sort({ sortOrder: 1, name: 1 });
     res.json({ categories });
   } catch (error) {
@@ -75,12 +92,12 @@ exports.getAllCategories = async (req, res) => {
     res.status(500).json({ message: 'Error fetching categories' });
   }
 };
+
 exports.getNestedCategories = async (req, res) => {
-    try {
+  try {
     const { city } = req.query;
     const mongoose = require('mongoose');
-    
-    // Build city filter
+
     let cityFilter = null;
     if (city) {
       const City = require('../models/City');
@@ -93,29 +110,23 @@ exports.getNestedCategories = async (req, res) => {
         }
       }
     }
-    
-    // Build queries with city filter if provided (with backward compatibility)
+
     const categoryQuery = { isActive: true };
     const subCategoryQuery = { isActive: true };
     const productQuery = { inStock: true, stock: { $gt: 0 } };
-    
+
     if (cityFilter) {
-      // Find ONLY items that have this city in their cities array
-      // No backward compatibility - only show explicitly assigned items
       categoryQuery.cities = cityFilter;
       subCategoryQuery.cities = cityFilter;
       productQuery.cities = cityFilter;
     }
-    
-    // 1. Fetch all main categories, sub-categories, and products in parallel
-    // Only fetch products that are in stock and have stock > 0
+
     const [categories, subCategories, products] = await Promise.all([
       Category.find(categoryQuery).sort({ sortOrder: 1 }).lean(),
       SubCategory.find(subCategoryQuery).sort({ sortOrder: 1 }).lean(),
       require('../models/Product').find(productQuery)
     ]);
 
-    // 2. Create a map for quick lookup of sub-categories by their parent ID
     const subCategoryMap = {};
     for (const sub of subCategories) {
       const parentId = sub.parentCategory.toString();
@@ -125,7 +136,6 @@ exports.getNestedCategories = async (req, res) => {
       subCategoryMap[parentId].push(sub);
     }
 
-    // 3. Count products for each category (only in-stock products)
     const productCountMap = {};
     for (const product of products) {
       const catId = product.category?.toString();
@@ -134,7 +144,6 @@ exports.getNestedCategories = async (req, res) => {
       }
     }
 
-    // 4. Attach the sub-categories and product count to their parent category
     const nestedCategories = categories.map(category => ({
       ...category,
       subCategories: subCategoryMap[category._id.toString()] || [],
@@ -143,10 +152,10 @@ exports.getNestedCategories = async (req, res) => {
 
     res.status(200).json(nestedCategories);
 
-    } catch (error) {
-        console.error('Error fetching nested categories:', error);
-        res.status(500).json({ message: 'Error fetching nested category data.', error: error.message });
-    }
+  } catch (error) {
+    console.error('Error fetching nested categories:', error);
+    res.status(500).json({ message: 'Error fetching nested category data.', error: error.message });
+  }
 };
 
 // Get single category
@@ -166,9 +175,8 @@ exports.getCategory = async (req, res) => {
 // Create new category with file upload
 exports.createCategory = async (req, res) => {
   try {
-    console.log('=== Starting Category Creation ===');
-    console.log('Files received:', req.files);
-    console.log('Body data:', req.body);
+    console.log('[CATEGORY CREATE] Files received:', req.files);
+    console.log('[CATEGORY CREATE] Body data:', req.body);
 
     if (!req.body.name || !req.body.description) {
       return res.status(400).json({ message: 'Name and description are required' });
@@ -178,18 +186,15 @@ exports.createCategory = async (req, res) => {
     let imageUrl = '';
     let videoUrl = '';
 
-    // Process uploaded files if present
     if (req.files) {
-      // Handle image upload
       if (req.files.image && req.files.image[0]) {
-        imageUrl = req.files.image[0].path; // Cloudinary URL
-        console.log('Added category image:', imageUrl);
+        imageUrl = req.files.image[0].path;
+        console.log('[CATEGORY CREATE] Image URL:', imageUrl);
       }
 
-      // Handle video upload
       if (req.files.video && req.files.video[0]) {
-        videoUrl = req.files.video[0].path; // Cloudinary URL
-        console.log('Added category video:', videoUrl);
+        videoUrl = req.files.video[0].path;
+        console.log('[CATEGORY CREATE] Video URL:', videoUrl);
       }
     }
 
@@ -202,24 +207,19 @@ exports.createCategory = async (req, res) => {
       isActive: categoryData.isActive !== 'false'
     });
 
-    console.log('Creating new category with data:', {
-      name: categoryData.name,
-      description: categoryData.description,
-      image: imageUrl,
-      video: videoUrl
-    });
-
     const savedCategory = await newCategory.save();
-    console.log('Category saved successfully:', savedCategory);
-    
+    console.log('[CATEGORY CREATE] Category saved successfully:', savedCategory._id.toString());
+
+    // Purge Redis cache
+    await purgeRedisCategoryCache(req);
+
     res.status(201).json({ 
       message: "Category created successfully", 
       category: savedCategory,
       uploadedFiles: req.files
     });
   } catch (error) {
-    console.error('=== Error creating category ===');
-    console.error('Error details:', error);
+    console.error('[CATEGORY CREATE ERROR]', error.message);
     res.status(500).json({ 
       message: "Error creating category", 
       error: error.message
@@ -230,36 +230,32 @@ exports.createCategory = async (req, res) => {
 // Update category with file upload
 exports.updateCategory = async (req, res) => {
   try {
-    console.log('Updating category with files:', req.files);
-    console.log('Update data:', req.body);
+    console.log('[CATEGORY UPDATE] Updating category with files:', req.files);
+    console.log('[CATEGORY UPDATE] Body data:', req.body);
 
     const id = req.params.id;
     const categoryData = req.body;
-    
+
     const existingCategory = await Category.findById(id);
     if (!existingCategory) {
       return res.status(404).json({ message: "Category not found" });
     }
 
-    // Handle file updates
     let imageUrl = existingCategory.image;
     let videoUrl = existingCategory.video;
 
     if (req.files) {
-      // Handle image update
       if (req.files.image && req.files.image[0]) {
         imageUrl = req.files.image[0].path;
-        console.log('Updated category image:', imageUrl);
+        console.log('[CATEGORY UPDATE] Image URL:', imageUrl);
       }
 
-      // Handle video update
       if (req.files.video && req.files.video[0]) {
         videoUrl = req.files.video[0].path;
-        console.log('Updated category video:', videoUrl);
+        console.log('[CATEGORY UPDATE] Video URL:', videoUrl);
       }
     }
 
-    // Update category object
     const updatedCategory = {
       name: categoryData.name || existingCategory.name,
       description: categoryData.description || existingCategory.description,
@@ -271,17 +267,11 @@ exports.updateCategory = async (req, res) => {
         : existingCategory.isActive
     };
 
-    console.log('Updating category with data:', {
-      id,
-      imageUrl,
-      videoUrl,
-      filesReceived: req.files ? Object.keys(req.files) : 'none',
-      isActiveReceived: categoryData.isActive,
-      isActiveType: typeof categoryData.isActive,
-      isActiveFinal: updatedCategory.isActive
-    });
-
     const savedCategory = await Category.findByIdAndUpdate(id, updatedCategory, { new: true });
+    console.log('[CATEGORY UPDATE] Updated successfully:', savedCategory._id.toString());
+
+    // Purge Redis cache
+    await purgeRedisCategoryCache(req);
 
     res.json({ 
       message: "Category updated successfully", 
@@ -289,7 +279,7 @@ exports.updateCategory = async (req, res) => {
       uploadedFiles: req.files
     });
   } catch (error) {
-    console.error('Error updating category:', error);
+    console.error('[CATEGORY UPDATE ERROR]', error.message);
     res.status(500).json({ message: "Error updating category", error: error.message });
   }
 };
@@ -301,6 +291,12 @@ exports.deleteCategory = async (req, res) => {
     if (!category) {
       return res.status(404).json({ message: 'Category not found' });
     }
+
+    console.log('[CATEGORY DELETE] Deleted category:', req.params.id);
+
+    // Purge Redis cache
+    await purgeRedisCategoryCache(req);
+
     res.json({ message: 'Category deleted successfully' });
   } catch (error) {
     console.error('Error in deleteCategory:', error);
@@ -312,14 +308,13 @@ exports.deleteCategory = async (req, res) => {
 exports.updateCategoryOrder = async (req, res) => {
   try {
     const { updates } = req.body;
-    
+
     if (!Array.isArray(updates)) {
       return res.status(400).json({ message: 'Updates must be an array' });
     }
 
-    console.log('Updating category order:', updates);
+    console.log('[CATEGORY ORDER] Updating order count:', updates.length);
 
-    // Update all categories in parallel
     const updatePromises = updates.map(update => 
       Category.findByIdAndUpdate(
         update.id,
@@ -330,6 +325,9 @@ exports.updateCategoryOrder = async (req, res) => {
 
     await Promise.all(updatePromises);
 
+    // Purge Redis cache
+    await purgeRedisCategoryCache(req);
+
     res.json({ 
       message: 'Category order updated successfully',
       updatedCount: updates.length
@@ -338,4 +336,4 @@ exports.updateCategoryOrder = async (req, res) => {
     console.error('Error updating category order:', error);
     res.status(500).json({ message: 'Error updating category order', error: error.message });
   }
-}; 
+};
