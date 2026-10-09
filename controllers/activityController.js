@@ -25,7 +25,29 @@ async function trackCheckoutStarted(req, res) {
     return res.status(500).json({ success: false, message: err.message });
   }
 }
+// POST /api/activity-tracking/whatsapp-inquiry
+async function trackWhatsAppInquiry(req, res) {
+  try {
+    const userId = req.user?.id || req.user?._id || null;
+    const { productId, productName, city } = req.body;
 
+    await ActivityLog.create({
+      user: userId,
+      action: 'whatsapp_inquiry',
+      product: productId || null,
+      metadata: {
+        productName: productName || null,
+        city: city || null,
+        userAgent: req.headers['user-agent'] || null,
+      }
+    });
+
+    return res.status(200).json({ success: true, message: 'WhatsApp inquiry logged' });
+  } catch (err) {
+    console.error('Error logging whatsapp_inquiry:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+}
 // POST /api/activity-tracking/checkout-completed
 async function trackCheckoutCompleted(req, res) {
   try {
@@ -247,6 +269,7 @@ module.exports = {
   trackCheckoutStarted,
   trackCheckoutCompleted,
   getLoginStatus,
+  trackWhatsAppInquiry,
   getNeverLoggedIn,
   getInactiveUsers,
   getUserActivity,

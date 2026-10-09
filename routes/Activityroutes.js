@@ -14,6 +14,7 @@ const {
   getMostViewedProducts,
   getUserProductHistory,
   getCheckoutFunnel,
+  trackWhatsAppInquiry
 } = require('../controllers/activityController');
 
 // Optional customer authenticator: Reads the Bearer token if present
@@ -37,7 +38,7 @@ const optionalCustomerAuth = (req, res, next) => {
 // ============================================================================
 router.post('/checkout-started', optionalCustomerAuth, trackCheckoutStarted);
 router.post('/checkout-completed', optionalCustomerAuth, trackCheckoutCompleted);
-
+router.post('/whatsapp-inquiry', optionalCustomerAuth, trackWhatsAppInquiry);
 // ============================================================================
 // 2. ADMIN-ONLY REPORTS (Protected by auth middleware)
 // ============================================================================
