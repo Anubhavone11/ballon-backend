@@ -26,20 +26,21 @@ async function trackCheckoutStarted(req, res) {
   }
 }
 // POST /api/activity-tracking/whatsapp-inquiry
+// POST /api/activity/whatsapp-inquiry
 async function trackWhatsAppInquiry(req, res) {
   try {
     const userId = req.user?.id || req.user?._id || null;
     const { productId, productName, city } = req.body;
 
     await ActivityLog.create({
-      user: userId,
+      user: userId, // Will now be accepted as null for guests
       action: 'whatsapp_inquiry',
       product: productId || null,
       metadata: {
         productName: productName || null,
         city: city || null,
         userAgent: req.headers['user-agent'] || null,
-      }
+      },
     });
 
     return res.status(200).json({ success: true, message: 'WhatsApp inquiry logged' });

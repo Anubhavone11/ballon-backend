@@ -20,6 +20,7 @@ const activityLogSchema = new mongoose.Schema(
         'product_view',        // opened a product detail page
         'checkout_started',    // hit checkout with items in cart
         'checkout_completed',  // order placed successfully
+        'whatsapp_inquiry',
       ],
       required: true,
       index: true,
