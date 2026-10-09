@@ -119,7 +119,7 @@ const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:5174',
   'http://localhost:5175',
-  'http://localhost:8081',
+  'http://192.168.1.10:8081',
   'https://www.decoryy.com',
   'https://ballon-frontend.vercel.app',
   'https://ballon-admin-beta.vercel.app',
