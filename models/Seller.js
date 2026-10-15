@@ -165,6 +165,10 @@ const sellerSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+   pushTokens: {
+    type: [String],
+    default: [],
+  },
 
   createdAt: {
     type: Date,

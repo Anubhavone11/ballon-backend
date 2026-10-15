@@ -3,6 +3,7 @@ const Counter = require('../models/Counter');
 const Seller = require('../models/Seller');
 const Product = require('../models/Product');
 const commissionController = require('./commissionController');
+const { emit } = require('../notifications'); // <-- NEW: notification system
 const nodemailer = require('nodemailer');
 const axios = require('axios');
 const fs = require('fs').promises;
@@ -394,6 +395,9 @@ const createOrder = async (req, res) => {
     sendOrderConfirmationEmail(savedOrder).catch(err => console.error('Email notification failed:', err));
     sendOrderConfirmationWhatsApp(savedOrder).catch(err => console.error('WhatsApp notification failed:', err));
 
+    // In-app + phone push notification (customer, and the partner if their link was used)
+    emit('order.created', { order: savedOrder, req, seller, commission });
+
     const orderResponse = {
       ...savedOrder.toObject(),
       scheduledDeliveryFormatted: formatScheduledDelivery(savedOrder.scheduledDelivery)
@@ -649,6 +653,11 @@ async function appendOrderToJson(order) {
 async function sendOrderStatusUpdateEmail(order) {
   const { email, customerName, orderStatus, customOrderId } = order;
   const subject = `Order Status Update: #${customOrderId}`;
+
+  // In-app + phone push notification for the status change.
+  // This function already runs whenever an order's status changes,
+  // so the notification is sent from the same place as the email.
+  emit('order.status', { order, status: orderStatus });
 
   const htmlBody = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 2px solid #FFD700; border-radius: 10px;">

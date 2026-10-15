@@ -49,6 +49,11 @@ const userSchema = new mongoose.Schema({
     type: String,
     default: '',
   },
+   // Expo push tokens, one per phone this person is logged in on
+  pushTokens: {
+    type: [String],
+    default: [],
+  },
 }, {
   timestamps: true,
 });

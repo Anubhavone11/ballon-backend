@@ -14,7 +14,12 @@ const VendorSchema = new mongoose.Schema({
     location: {
         type: { type: String, enum: ['Point'], default: 'Point' },
         coordinates: { type: [Number], required: true } // [Longitude, Latitude]
-    }
+    },
+     // Expo push tokens, one per phone this person is logged in on
+  pushTokens: {
+    type: [String],
+    default: [],
+  },
 }, { timestamps: true });
 
 VendorSchema.index({ location: '2dsphere' });

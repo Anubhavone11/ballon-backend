@@ -119,7 +119,7 @@ const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:5174',
   'http://localhost:5175',
-  'http://192.168.1.10:8081',
+  'http://localhost:8081',
   'https://www.decoryy.com',
   'https://ballon-frontend.vercel.app',
   'https://ballon-admin-beta.vercel.app',
@@ -281,7 +281,7 @@ async function startServer() {
     // 4. Attach Routes
     app.use('/api/auth', authLimiter, authRoutes);
     app.use('/api/admin/auth', authLimiter, adminAuthRoutes);
-
+    app.use('/api/notifications', require('./routes/notifications'));
     // High-Read Cached Routes
     app.use('/api/categories', cacheMiddleware(300), categoryRoutes);       // 5 mins
     // Original mount: serves /api/categories/:id/subcategories (cache above already wraps it)

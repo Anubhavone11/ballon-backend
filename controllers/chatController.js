@@ -2,6 +2,7 @@
 const mongoose = require("mongoose");
 const Chat = require("../models/Chat");
 const Booking = require("../models/Booking");
+const { emit } = require("../notifications");
 
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 
@@ -148,6 +149,38 @@ exports.sendMessage = async (req, res) => {
         message: savedMsg,
       });
     }
+
+    // Push notification to the other person, unless they are inside this chat room.
+    // Never awaited and never allowed to fail the request.
+    (async () => {
+      try {
+        const recipientType = callerType === "user" ? "seller" : "user";
+        const recipientId = callerType === "user" ? chat.sellerId : chat.userId;
+
+        let recipientInRoom = false;
+        if (io) {
+          const socketsInRoom = await io.in(`booking_${bookingId}`).fetchSockets();
+          recipientInRoom = socketsInRoom.some(
+            (s) =>
+              s.principal?.type === recipientType &&
+              String(s.principal.id) === String(recipientId)
+          );
+        }
+
+        if (!recipientInRoom) {
+          const sender = req.user || req.seller;
+          emit("chat.message", {
+            chat,
+            bookingId,
+            senderType: callerType,
+            senderName: sender?.name,
+            text: newMessage.text,
+          });
+        }
+      } catch (pushErr) {
+        console.error("chat push error:", pushErr.message);
+      }
+    })();
 
     return res.json({ success: true, message: savedMsg });
   } catch (error) {

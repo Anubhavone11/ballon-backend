@@ -7,6 +7,7 @@ const axios = require("axios");
 const sharp = require("sharp");
 const FormData = require("form-data");
 const { releaseSeller } = require("../utils/sellerAvailability");
+const { emit } = require("../notifications"); // <-- NEW: notification system
 
 exports.initWhatsApp = () => {
   console.log("ℹ️ initWhatsApp() called — WhatsApp messages are sent via Meta Graph API.");
@@ -47,11 +48,29 @@ const normalizePhone = (rawPhone) => {
   return clean.length === 10 ? `91${clean}` : clean;
 };
 
+// Notifications must never break a booking request.
+// Works whether emit() is sync or returns a promise.
+const safeEmit = (event, payload) => {
+  try {
+    const result = emit(event, payload);
+    if (result && typeof result.catch === "function") {
+      result.catch((e) => console.error(`❌ emit(${event}) failed:`, e));
+    }
+  } catch (e) {
+    console.error(`❌ emit(${event}) failed:`, e);
+  }
+};
+
 // ─── Upload image to Meta ─────────────────────────────────────────────────────
 
 const uploadImageToMeta = async (imageUrl) => {
   try {
-    const response = await axios.get(imageUrl, { responseType: "arraybuffer" });
+    if (!imageUrl || typeof imageUrl !== "string") {
+      console.error("❌ Media upload skipped: no image URL on product:", imageUrl);
+      return null;
+    }
+
+    const response = await axios.get(imageUrl, { responseType: "arraybuffer", timeout: 15000 });
     const jpegBuffer = await sharp(response.data).jpeg().toBuffer();
 
     const form = new FormData();
@@ -71,7 +90,10 @@ const uploadImageToMeta = async (imageUrl) => {
 
     return metaResponse.data.id;
   } catch (error) {
-    console.error("❌ Media upload failed:", error?.response?.data || error.message);
+    // responseType "arraybuffer" turns error bodies into Buffers, so decode them
+    let details = error?.response?.data ?? error.message;
+    if (Buffer.isBuffer(details)) details = details.toString("utf8").slice(0, 500);
+    console.error(`❌ Media upload failed for ${imageUrl} (HTTP ${error?.response?.status}):`, details);
     return null;
   }
 };
@@ -104,7 +126,8 @@ const sendJobOfferToSeller = async (seller, booking) => {
       : {
           type: "image",
           image: {
-            link: "https://upload.wikimedia.org/wikipedia/commons/e/e1/FullMoon2010.jpg",
+            // Set WA_FALLBACK_IMAGE_URL to a public JPG/PNG (your logo) in .env
+            link: process.env.WA_FALLBACK_IMAGE_URL || `${APP_BASE_URL}/logo.png`,
           },
         };
 
@@ -162,6 +185,9 @@ const sendJobOfferToSeller = async (seller, booking) => {
     const declineUrl = `${API_BASE_URL}/reject/${booking._id}?sellerId=${seller._id}`;
     console.log(`🔗 Accept link:  ${acceptUrl}`);
     console.log(`🔗 Decline link: ${declineUrl}`);
+
+    // 🔔 Push the new job offer to the vendor (in addition to WhatsApp)
+    safeEmit("booking.offer", { booking, seller });
 
     return true;
   } catch (err) {
@@ -222,6 +248,17 @@ const sendVendorAssignedToCustomer = async (booking, seller) => {
 
 // ─── Matchmaking pipeline ─────────────────────────────────────────────────────
 
+// Marks a booking as allocation_failed and notifies the customer
+const failAllocation = async (bookingId) => {
+  const failed = await Booking.findByIdAndUpdate(
+    bookingId,
+    { status: "allocation_failed" },
+    { new: true }
+  );
+  if (failed) safeEmit("booking.status", { booking: failed, status: "allocation_failed" });
+  return failed;
+};
+
 const processMatchmakingPipeline = async (bookingId) => {
   try {
     const booking = await Booking.findById(bookingId).populate("selectedProductId");
@@ -229,7 +266,7 @@ const processMatchmakingPipeline = async (bookingId) => {
 
     const sellerQueue = booking.routingQueue || [];
     if (sellerQueue.length === 0) {
-      await Booking.findByIdAndUpdate(bookingId, { status: "allocation_failed" });
+      await failAllocation(bookingId);
       return;
     }
 
@@ -242,7 +279,7 @@ const processMatchmakingPipeline = async (bookingId) => {
     });
 
     if (availableSellers.length === 0) {
-      await Booking.findByIdAndUpdate(bookingId, { status: "allocation_failed" });
+      await failAllocation(bookingId);
       console.log(`❌ No available sellers for booking ${bookingId}.`);
       return;
     }
@@ -377,6 +414,9 @@ exports.createInstantBooking = async (req, res) => {
       currentRoutingIndex: 0,
     });
 
+    // 🔔 Customer: "Booking received"
+    safeEmit("booking.created", { booking, req });
+
     processMatchmakingPipeline(booking._id).catch((err) =>
       console.error("Background matchmaking error:", err)
     );
@@ -455,6 +495,13 @@ exports.acceptBooking = async (req, res) => {
     sendVendorAssignedToCustomer(populatedBooking, resultSeller).catch((err) =>
       console.error("❌ Customer post-accept notification error:", err)
     );
+
+    // 🔔 Customer: "Decorator confirmed"
+    safeEmit("booking.status", {
+      booking: populatedBooking,
+      status: "seller_assigned",
+      seller: resultSeller,
+    });
 
     if (req.xhr || req.headers.accept?.includes("application/json") || !req.query.sellerId) {
       return res.json({ success: true, message: "Booking accepted!", booking: populatedBooking });
@@ -604,6 +651,9 @@ exports.completeBooking = async (req, res) => {
     // Booking is saved as completed, so it's safe to free the seller now
     await releaseSeller(sellerId, { countCompleted: true });
 
+    // 🔔 Customer: "Setup complete"
+    safeEmit("booking.status", { booking, status: "completed" });
+
     return res.json({ success: true, booking });
   } catch (err) {
     console.error("completeBooking error:", err);
@@ -649,6 +699,9 @@ exports.sellerCancelBooking = async (req, res) => {
     // Available again immediately
     await releaseSeller(sellerId);
 
+    // 🔔 Customer: "Booking cancelled"
+    safeEmit("booking.status", { booking, status: "cancelled", cancelledBy: "seller" });
+
     return res.json({ success: true, message: "Booking cancelled successfully." });
   } catch (err) {
     console.error("sellerCancelBooking error:", err);
@@ -677,6 +730,7 @@ exports.cancelBooking = async (req, res) => {
     }
 
     const hadSeller = booking.sellerId && ["seller_assigned", "accepted"].includes(booking.status);
+    const assignedSellerId = booking.sellerId;
 
     booking.status             = "cancelled";
     booking.cancelledAt        = new Date();
@@ -688,6 +742,14 @@ exports.cancelBooking = async (req, res) => {
     if (hadSeller) {
       // Available again immediately
       await releaseSeller(booking.sellerId);
+    }
+
+    // 🔔 Customer: "Booking cancelled"
+    safeEmit("booking.status", { booking, status: "cancelled", cancelledBy: "customer" });
+
+    // 🔔 Vendor: "Customer cancelled the job"
+    if (hadSeller) {
+      safeEmit("booking.seller_cancelled", { booking, sellerId: assignedSellerId });
     }
 
     return res.json({ success: true, booking });
@@ -822,6 +884,9 @@ exports.createScheduledBooking = async (req, res) => {
       serviceDetails: { name, guestCount, eventType },
       pickupLocation: { address: locationAddress, coordinates: [longitude, latitude] },
     });
+
+    // 🔔 Customer: "Booking received"
+    safeEmit("booking.created", { booking, req });
 
     return res.status(201).json({ success: true, booking });
   } catch (err) {

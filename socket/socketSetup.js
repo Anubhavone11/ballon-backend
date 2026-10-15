@@ -2,6 +2,7 @@
 const { Server } = require("socket.io");
 const jwt = require("jsonwebtoken");
 const Chat = require("../models/Chat");
+const { emit } = require("../notifications");
 
 /**
  * Authenticate a socket connection.
@@ -133,6 +134,33 @@ const initSocket = (server) => {
           bookingId,
           message: savedMsg,
         });
+
+        // Push notification, but only if the other person isn't already
+        // inside this chat room (they would see the message live anyway).
+        try {
+          const recipientType = callerType === "user" ? "seller" : "user";
+          const recipientId = callerType === "user" ? chat.sellerId : chat.userId;
+
+          const socketsInRoom = await io.in(room).fetchSockets();
+          const recipientInRoom = socketsInRoom.some(
+            (s) =>
+              s.principal?.type === recipientType &&
+              String(s.principal.id) === String(recipientId)
+          );
+
+          if (!recipientInRoom) {
+            emit("chat.message", {
+              chat,
+              bookingId,
+              senderType: callerType,
+              senderName: callerName,
+              text: newMessage.text,
+            });
+          }
+        } catch (pushErr) {
+          // A notification problem must never affect message delivery
+          console.error("chat push error:", pushErr.message);
+        }
       } catch (err) {
         console.error("send_message socket error:", err);
         socket.emit("error_event", { message: "Failed to deliver message." });
