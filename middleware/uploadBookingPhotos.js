@@ -35,22 +35,29 @@ const upload = multer({
  */
 const uploadBookingPhotos = (req, res, next) => {
   upload.array('images', MAX_FILES)(req, res, (err) => {
-    if (!err) return next();
+    if (!err) {
+      console.log('[uploadBookingPhotos] ok, files =', (req.files || []).length);
+      return next();
+    }
+
+    // Log EVERY error with its details
+    console.error('[uploadBookingPhotos] FAILED:', err.name, err.code, err.message, err.http_code || '');
+
+    const isUserError =
+      err instanceof multer.MulterError || err.code === 'INVALID_FILE_TYPE';
 
     let message = err.message || 'Photo upload failed.';
-
     if (err instanceof multer.MulterError) {
       if (err.code === 'LIMIT_FILE_SIZE') {
         message = `Each photo must be under ${MAX_FILE_SIZE / (1024 * 1024)} MB.`;
       } else if (err.code === 'LIMIT_FILE_COUNT' || err.code === 'LIMIT_UNEXPECTED_FILE') {
-        message = `You can upload up to ${MAX_FILES} photos at a time.`;
+        message = `Upload problem (${err.code}). Field must be "images", max ${MAX_FILES} photos.`;
       }
-    } else if (err.code !== 'INVALID_FILE_TYPE') {
-      console.error('uploadBookingPhotos error:', err);
+    } else if (!isUserError) {
       message = 'Photo upload failed. Please try again.';
     }
 
-    return res.status(400).json({ success: false, message });
+    return res.status(isUserError ? 400 : 500).json({ success: false, message });
   });
 };
 

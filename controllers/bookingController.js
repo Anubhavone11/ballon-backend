@@ -7,7 +7,8 @@ const axios = require("axios");
 const sharp = require("sharp");
 const FormData = require("form-data");
 const { releaseSeller } = require("../utils/sellerAvailability");
-const { emit } = require("../notifications"); // <-- NEW: notification system
+const { emit } = require("../notifications");
+const { emitToSeller, isSellerOnline } = require("../socket/socketSetup");
 
 exports.initWhatsApp = () => {
   console.log("ℹ️ initWhatsApp() called — WhatsApp messages are sent via Meta Graph API.");
@@ -18,6 +19,7 @@ exports.initWhatsApp = () => {
 const OFFER_TIMEOUT_MS             = parseInt(process.env.MATCHMAKING_OFFER_TIMEOUT_MS, 10) || 60000;
 const ABSOLUTE_MAX_BROADCAST_LIMIT = parseInt(process.env.ABSOLUTE_MAX_BROADCAST_LIMIT, 10) || 12;
 const ANTI_BAN_DELAY_MS            = parseInt(process.env.ANTI_BAN_DELAY_MS, 10)            || 40000;
+const RING_TIMEOUT_MS              = parseInt(process.env.RING_TIMEOUT_MS, 10)              || 30000;
 const APP_BASE_URL                 = process.env.APP_BASE_URL || "https://decoryy.com";
 const API_BASE_URL                 = process.env.API_BASE_URL || "https://api.decoryy.com/api/bookings";
 const TRACKING_TOKEN_SECRET        = process.env.TRACKING_TOKEN_SECRET;
@@ -29,6 +31,82 @@ const MAX_COMPLETION_IMAGES = 8;
 
 // Statuses that mean "this job is decided, stop offering it to other sellers"
 const ACTIVE_STATUSES = ["seller_assigned", "accepted", "cancelled", "completed"];
+
+// ─── In-memory live offer state (single server process) ──────────────────────
+// If you ever run several instances, move these to Redis.
+const waiters = new Map();         // bookingId -> { sellerId, wake }
+const liveOffers = new Map();      // sellerId  -> { bookingId, payload, expiresAt }
+const activePipelines = new Set(); // bookingIds whose dispatch loop is running
+
+// Waits until the seller answers (wake) or the time runs out
+const waitForResponse = (bookingId, sellerId, ms) =>
+  new Promise((resolve) => {
+    const key = String(bookingId);
+    const done = () => { clearTimeout(timer); waiters.delete(key); resolve(); };
+    const timer = setTimeout(done, ms);
+    waiters.set(key, { sellerId: String(sellerId), wake: done });
+  });
+
+// sellerId optional: without it, anyone's wait is ended (used on accept/cancel)
+const wakeWaiter = (bookingId, sellerId) => {
+  const w = waiters.get(String(bookingId));
+  if (w && (!sellerId || w.sellerId === String(sellerId))) w.wake();
+};
+
+// Everything the vendor sees on the ring screen
+const buildOfferPayload = (booking, ttlMs) => {
+  const product = booking.selectedProductId || {};
+  const coords = booking.pickupLocation?.coordinates; // stored as [lng, lat]
+
+  return {
+    bookingId: String(booking._id),
+    ttlMs, // relative time, so phone clock differences don't matter
+    bookingType: booking.bookingType || "instant",
+
+    // Product
+    productName: product.name || "Decoration Package",
+    price: product.price || booking.estimatedPrice || 0,
+    image: product.image?.url || (typeof product.image === "string" ? product.image : null),
+    deliveryTime: product.instantDeliveryTime || "30 mins",
+
+    // Booking details
+    customerName: booking.serviceDetails?.name || "Customer",
+    decorType: booking.serviceDetails?.decorType || "",
+    eventType: booking.serviceDetails?.eventType || "",
+    guestCount: booking.serviceDetails?.guestCount || null,
+    note: booking.serviceDetails?.note || "",
+    scheduledTime: booking.scheduledTime || null,
+
+    // Venue
+    address: booking.pickupLocation?.address || "",
+    city: booking.pickupLocation?.city || "",
+    pincode: booking.pickupLocation?.pincode || "",
+    lat: Array.isArray(coords) ? coords[1] : null,
+    lng: Array.isArray(coords) ? coords[0] : null,
+
+    // customer phone is NOT sent here; the seller gets it after accepting
+  };
+};
+
+// Close the ringing screen on every seller's phone for this booking
+const closeAllOffers = (bookingId, reason, exceptSellerId) => {
+  for (const [sid, o] of liveOffers) {
+    if (o.bookingId !== String(bookingId)) continue;
+    liveOffers.delete(sid);
+    if (String(sid) !== String(exceptSellerId)) {
+      emitToSeller(sid, "booking:offer_closed", { bookingId: String(bookingId), reason });
+    }
+  }
+};
+
+// Used by socketSetup when a seller (re)connects while a job is ringing for them
+exports.getPendingOffer = (sellerId) => {
+  const o = liveOffers.get(String(sellerId));
+  if (!o) return null;
+  const left = o.expiresAt - Date.now();
+  if (left <= 1000) { liveOffers.delete(String(sellerId)); return null; }
+  return { ...o.payload, ttlMs: left };
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -109,7 +187,7 @@ const formatEventDateTime = (date) => {
   });
 };
 
-// ─── WhatsApp job offer dispatcher ───────────────────────────────────────────
+// ─── WhatsApp job offer dispatcher (template unchanged) ──────────────────────
 
 const sendJobOfferToSeller = async (seller, booking) => {
   try {
@@ -186,9 +264,6 @@ const sendJobOfferToSeller = async (seller, booking) => {
     console.log(`🔗 Accept link:  ${acceptUrl}`);
     console.log(`🔗 Decline link: ${declineUrl}`);
 
-    // 🔔 Push the new job offer to the vendor (in addition to WhatsApp)
-    safeEmit("booking.offer", { booking, seller });
-
     return true;
   } catch (err) {
     console.error("❌ sendJobOfferToSeller failed:", err.response?.data || err.message);
@@ -260,6 +335,15 @@ const failAllocation = async (bookingId) => {
 };
 
 const processMatchmakingPipeline = async (bookingId) => {
+  const key = String(bookingId);
+
+  // Never run two dispatch loops for the same booking (sweep, decline, etc.)
+  if (activePipelines.has(key)) {
+    console.log(`⏳ Pipeline already running for ${key}. Skipping duplicate run.`);
+    return;
+  }
+  activePipelines.add(key);
+
   try {
     const booking = await Booking.findById(bookingId).populate("selectedProductId");
     if (!booking || ACTIVE_STATUSES.includes(booking.status)) return;
@@ -316,11 +400,56 @@ const processMatchmakingPipeline = async (bookingId) => {
         break;
       }
 
-      await sendJobOfferToSeller(seller, updatedBooking);
-      await delay(ANTI_BAN_DELAY_MS);
+      // App users get a short "ring" window; WhatsApp-only users get the longer gap
+      const online = isSellerOnline(seller._id);
+      const waitMs = online ? RING_TIMEOUT_MS : ANTI_BAN_DELAY_MS;
+
+      // Fresh validity window for THIS seller, so Accept links never expire mid-queue
+      await Booking.updateOne(
+        { _id: bookingId, status: "pending_allocation" },
+        {
+          offerExpiresAt: new Date(Date.now() + Math.max(OFFER_TIMEOUT_MS, waitMs + 5000)),
+          notifiedSellerId: seller._id,
+        }
+      );
+
+      // 1) Ring the app instantly (with full booking details)
+      if (online) {
+        const payload = buildOfferPayload(updatedBooking, RING_TIMEOUT_MS);
+        liveOffers.set(String(seller._id), {
+          bookingId: key,
+          payload,
+          expiresAt: Date.now() + RING_TIMEOUT_MS,
+        });
+        emitToSeller(seller._id, "booking:offer", payload);
+      }
+
+      // 2) Push notification (covers backgrounded / closed app)
+      safeEmit("booking.offer", { booking: updatedBooking, seller });
+
+      // 3) WhatsApp template (same as before), sent in parallel with the ring
+      const whatsappSend = sendJobOfferToSeller(seller, updatedBooking);
+
+      // Accept or decline ends this wait immediately
+      await waitForResponse(bookingId, seller._id, waitMs);
+
+      // Take this offer off the seller's screen if they didn't answer
+      const mine = liveOffers.get(String(seller._id));
+      if (mine && mine.bookingId === key) {
+        liveOffers.delete(String(seller._id));
+        emitToSeller(seller._id, "booking:offer_closed", { bookingId: key, reason: "timeout" });
+      }
+
+      await whatsappSend;
     }
+
+    // Everyone was offered and nobody took it
+    const final = await Booking.findById(bookingId).select("status").lean();
+    if (final?.status === "pending_allocation") await failAllocation(bookingId);
   } catch (err) {
     console.error("Matchmaking pipeline error:", err);
+  } finally {
+    activePipelines.delete(key);
   }
 };
 
@@ -433,22 +562,20 @@ exports.createInstantBooking = async (req, res) => {
   }
 };
 
-// ─── Seller accept booking ────────────────────────────────────────────────────
+// ─── Accept / decline core (shared by socket, app REST and WhatsApp links) ───
 // Accepting marks the seller as busy (isAllocated = true) inside the same
 // transaction that assigns the booking. They stay busy until the booking is
 // completed (with photos) or cancelled.
 
-exports.acceptBooking = async (req, res) => {
+const acceptBookingCore = async (bookingId, sellerId) => {
+  if (!isValidObjectId(bookingId) || !isValidObjectId(sellerId)) {
+    const err = new Error("Invalid seller or booking identifier.");
+    err.code = "INVALID";
+    throw err;
+  }
+
   const session = await mongoose.startSession();
   try {
-    const { bookingId }  = req.params;
-    const querySellerId  = req.query.sellerId;
-    const sellerId       = (querySellerId && isValidObjectId(querySellerId)) ? querySellerId : req.seller?.id;
-
-    if (!sellerId || !isValidObjectId(bookingId)) {
-      return res.status(401).send(errorPage("Invalid seller or booking identifier."));
-    }
-
     let resultBooking = null;
     let resultSeller = null;
 
@@ -488,61 +615,95 @@ exports.acceptBooking = async (req, res) => {
       resultSeller  = seller;
     });
 
-    const populatedBooking = await Booking.findById(resultBooking._id)
+    const populated = await Booking.findById(resultBooking._id)
       .populate("selectedProductId")
       .lean();
 
-    sendVendorAssignedToCustomer(populatedBooking, resultSeller).catch((err) =>
+    sendVendorAssignedToCustomer(populated, resultSeller).catch((err) =>
       console.error("❌ Customer post-accept notification error:", err)
     );
 
     // 🔔 Customer: "Decorator confirmed"
     safeEmit("booking.status", {
-      booking: populatedBooking,
+      booking: populated,
       status: "seller_assigned",
       seller: resultSeller,
     });
 
-    if (req.xhr || req.headers.accept?.includes("application/json") || !req.query.sellerId) {
-      return res.json({ success: true, message: "Booking accepted!", booking: populatedBooking });
-    }
+    // Stop ringing on every other seller's phone and end the dispatch wait
+    closeAllOffers(bookingId, "taken", sellerId);
+    wakeWaiter(bookingId);
 
-    return res.send(successPage(populatedBooking, resultSeller));
-
-  } catch (err) {
-    console.error("acceptBooking error:", err);
-    const msg = err.code ? err.message : "Could not accept this booking. Please try again.";
-
-    if (req.xhr || req.headers.accept?.includes("application/json")) {
-      return res.status(409).json({ success: false, message: msg });
-    }
-    return res.status(409).send(warningPage(msg));
+    return { booking: populated, seller: resultSeller };
   } finally {
     await session.endSession();
   }
 };
 
-// ─── Seller reject booking ────────────────────────────────────────────────────
+const declineBookingCore = async (bookingId, sellerId) => {
+  if (!isValidObjectId(bookingId) || !isValidObjectId(sellerId)) return;
+
+  const mine = liveOffers.get(String(sellerId));
+  if (mine && mine.bookingId === String(bookingId)) liveOffers.delete(String(sellerId));
+
+  await Booking.updateOne(
+    { _id: bookingId, status: "pending_allocation" },
+    { $pull: { routingQueue: sellerId } }
+  );
+
+  // The running loop moves to the next seller right now
+  wakeWaiter(bookingId, sellerId);
+};
+
+exports.acceptBookingCore = acceptBookingCore;
+exports.declineBookingCore = declineBookingCore;
+
+// ─── Seller accept booking (REST / WhatsApp link) ────────────────────────────
+
+exports.acceptBooking = async (req, res) => {
+  const { bookingId } = req.params;
+  const q = req.query.sellerId;
+  const sellerId = q && isValidObjectId(q) ? q : req.seller?.id;
+  const wantsJson = req.xhr || req.headers.accept?.includes("application/json");
+
+  if (!sellerId || !isValidObjectId(bookingId)) {
+    return res.status(401).send(errorPage("Invalid seller or booking identifier."));
+  }
+
+  try {
+    const { booking, seller } = await acceptBookingCore(bookingId, sellerId);
+
+    if (wantsJson || !req.query.sellerId) {
+      return res.json({ success: true, message: "Booking accepted!", booking });
+    }
+    return res.send(successPage(booking, seller));
+  } catch (err) {
+    console.error("acceptBooking error:", err);
+    const msg = err.code ? err.message : "Could not accept this booking. Please try again.";
+
+    if (wantsJson) {
+      return res.status(409).json({ success: false, message: msg });
+    }
+    return res.status(409).send(warningPage(msg));
+  }
+};
+
+// ─── Seller reject booking (REST / WhatsApp link) ────────────────────────────
 
 exports.rejectBooking = async (req, res) => {
+  const { bookingId } = req.params;
+  const q = req.query.sellerId;
+  const sellerId = q && isValidObjectId(q) ? q : req.seller?.id;
+
+  if (!sellerId || !isValidObjectId(bookingId)) {
+    return res.status(401).send(errorPage("Invalid seller or booking identifier."));
+  }
+
   try {
-    const { bookingId } = req.params;
-    const querySellerId = req.query.sellerId;
-    const sellerId      = (querySellerId && isValidObjectId(querySellerId)) ? querySellerId : req.seller?.id;
-
-    if (!sellerId || !isValidObjectId(bookingId)) {
-      return res.status(401).send(errorPage("Invalid seller or booking identifier."));
-    }
-
-    const booking = await Booking.findById(bookingId);
-
-    if (booking && booking.status === "pending_allocation") {
-      await Booking.findByIdAndUpdate(bookingId, { $pull: { routingQueue: sellerId } });
-      processMatchmakingPipeline(bookingId).catch((err) =>
-        console.error("Pipeline error after rejection:", err)
-      );
-    }
-
+    // Does NOT start a second pipeline; it just wakes the running one
+    await declineBookingCore(bookingId, sellerId);
+    // Also close their ringing screen if they declined from WhatsApp
+    emitToSeller(sellerId, "booking:offer_closed", { bookingId: String(bookingId), reason: "declined" });
     return res.send(rejectPage());
   } catch (err) {
     console.error("rejectBooking error:", err);
@@ -630,7 +791,6 @@ exports.completeBooking = async (req, res) => {
     );
 
     if (!booking) {
-      // Work out why, so the seller gets a useful message
       const existing = await Booking.findOne({ _id: bookingId, sellerId }).select("status");
       if (!existing) {
         return res.status(404).json({ success: false, message: "Booking not found for your account." });
@@ -738,6 +898,10 @@ exports.cancelBooking = async (req, res) => {
     booking.notifiedSellerId   = null;
     booking.offerExpiresAt     = null;
     await booking.save();
+
+    // If vendors were still being offered this job, stop ringing them
+    closeAllOffers(bookingId, "cancelled");
+    wakeWaiter(bookingId);
 
     if (hadSeller) {
       // Available again immediately

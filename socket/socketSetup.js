@@ -4,6 +4,8 @@ const jwt = require("jsonwebtoken");
 const Chat = require("../models/Chat");
 const { emit } = require("../notifications");
 
+let io = null;
+
 /**
  * Authenticate a socket connection.
  * Accepts both user JWTs and seller JWTs.
@@ -26,9 +28,8 @@ const authenticateSocket = (token) => {
   return null;
 };
 
-// REMOVED 'app' from the parameters here
 const initSocket = (server) => {
-  const io = new Server(server, {
+  io = new Server(server, {
     cors: {
       origin: process.env.CLIENT_ORIGIN || "*",
       methods: ["GET", "POST"],
@@ -62,6 +63,45 @@ const initSocket = (server) => {
     const { id: callerId, type: callerType, name: callerName } = socket.principal;
     console.log(`🔌 Socket connected | ${callerType}: ${callerName} (${callerId})`);
 
+    // ---- Personal rooms (used for job offers now, live customer updates later) ----
+    if (callerType === "seller") {
+      socket.join(`seller:${callerId}`);
+
+      // If a job is ringing for this seller right now (reconnect, or they tapped
+      // the push), show it again with the time that is really left.
+      try {
+        const { getPendingOffer } = require("../controllers/bookingController");
+        const pending = getPendingOffer(callerId);
+        if (pending) socket.emit("booking:offer", pending);
+      } catch (e) {
+        console.error("pending offer replay error:", e.message);
+      }
+    } else {
+      socket.join(`user:${callerId}`);
+    }
+
+    // ---- JOB OFFER: seller accepts (the "answer the call" button) ----
+    socket.on("offer:accept", async ({ bookingId } = {}, ack) => {
+      if (callerType !== "seller") return ack?.({ ok: false, message: "Not allowed." });
+      // lazy require avoids a circular import with bookingController
+      const { acceptBookingCore } = require("../controllers/bookingController");
+      try {
+        // sellerId comes from the verified token, never from the client
+        const { booking } = await acceptBookingCore(bookingId, callerId);
+        ack?.({ ok: true, booking });
+      } catch (err) {
+        ack?.({ ok: false, message: err.code ? err.message : "Could not accept this booking." });
+      }
+    });
+
+    // ---- JOB OFFER: seller declines ----
+    socket.on("offer:decline", async ({ bookingId } = {}, ack) => {
+      if (callerType !== "seller") return ack?.({ ok: false });
+      const { declineBookingCore } = require("../controllers/bookingController");
+      await declineBookingCore(bookingId, callerId).catch(() => {});
+      ack?.({ ok: true });
+    });
+
     // ---- JOIN a booking chat room ----
     socket.on("join_booking_chat", async ({ bookingId }) => {
       try {
@@ -71,7 +111,6 @@ const initSocket = (server) => {
           return;
         }
 
-        // Verify the caller is a party
         const isParty =
           (callerType === "user" && String(chat.userId) === String(callerId)) ||
           (callerType === "seller" && String(chat.sellerId) === String(callerId));
@@ -86,7 +125,6 @@ const initSocket = (server) => {
         socket.currentRoom = room;
         console.log(`📨 ${callerType} ${callerName} joined room ${room}`);
 
-        // Confirm join
         socket.emit("joined_chat", { bookingId, room });
       } catch (err) {
         console.error("join_booking_chat error:", err);
@@ -127,7 +165,6 @@ const initSocket = (server) => {
 
         const savedMsg = chat.messages[chat.messages.length - 1];
 
-        // Broadcast to the booking room (both parties)
         const room = `booking_${bookingId}`;
         io.to(room).emit("new_message", {
           chatId: chat._id,
@@ -135,8 +172,6 @@ const initSocket = (server) => {
           message: savedMsg,
         });
 
-        // Push notification, but only if the other person isn't already
-        // inside this chat room (they would see the message live anyway).
         try {
           const recipientType = callerType === "user" ? "seller" : "user";
           const recipientId = callerType === "user" ? chat.sellerId : chat.userId;
@@ -158,7 +193,6 @@ const initSocket = (server) => {
             });
           }
         } catch (pushErr) {
-          // A notification problem must never affect message delivery
           console.error("chat push error:", pushErr.message);
         }
       } catch (err) {
@@ -183,8 +217,7 @@ const initSocket = (server) => {
 
     // ---- LEAVE room ----
     socket.on("leave_booking_chat", ({ bookingId }) => {
-      const room = `booking_${bookingId}`;
-      socket.leave(room);
+      socket.leave(`booking_${bookingId}`);
     });
 
     socket.on("disconnect", () => {
@@ -195,4 +228,17 @@ const initSocket = (server) => {
   return io;
 };
 
-module.exports = { initSocket };
+// ─── Helpers used by other files ─────────────────────────────────────────────
+const emitToSeller = (sellerId, event, payload) => {
+  io?.to(`seller:${sellerId}`).emit(event, payload);
+};
+const emitToSellers = (sellerIds, event, payload) => {
+  (sellerIds || []).forEach((id) => emitToSeller(id, event, payload));
+};
+const emitToUser = (userId, event, payload) => {
+  io?.to(`user:${userId}`).emit(event, payload);
+};
+const isSellerOnline = (sellerId) =>
+  (io?.sockets.adapter.rooms.get(`seller:${sellerId}`)?.size || 0) > 0;
+
+module.exports = { initSocket, emitToSeller, emitToSellers, emitToUser, isSellerOnline };
