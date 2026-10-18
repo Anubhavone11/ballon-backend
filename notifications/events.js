@@ -4,11 +4,7 @@
 //
 // Each event is a function that receives the data you pass to emit(...)
 // and returns a list of messages:
-//   { to: 'customer' | 'seller' | 'vendor', id, title, body, route }
-//
-// To add a new notification: add a new entry below, then call
-//   emit('your.event', { ...data })
-// from wherever it happens. Nothing else to create.
+//   { to: 'customer' | 'seller', id, title, body, route, channelId, categoryId, priority, sound, data }
 
 const { customerIdForOrder } = require('./recipients');
 
@@ -38,9 +34,6 @@ const ORDER_STATUS_TEXT = {
   cancelled: 'cancelled',
 };
 
-// Customer-facing booking messages, keyed by booking status.
-// `seller_assigned` is what the booking controller sets when a vendor accepts;
-// `vendor_assigned` is kept as an alias for older callers.
 const BOOKING_CUSTOMER = {
   seller_assigned: (seller) => ({
     title: 'Decorator confirmed 🎉',
@@ -88,6 +81,9 @@ module.exports = {
         title: 'Order placed',
         body: `Your order #${order.customOrderId} (${money(order.totalAmount)}) is confirmed${when(order.scheduledDelivery)}.`,
         route: '/account',
+        channelId: 'default',
+        priority: 'high',
+        sound: 'default',
       });
     }
 
@@ -98,6 +94,9 @@ module.exports = {
         title: 'New order from your link',
         body: `Order #${order.customOrderId} placed${commission ? `. You earn ${money(commission)} commission` : ''}.`,
         route: '/account',
+        channelId: 'default',
+        priority: 'high',
+        sound: 'default',
       });
     }
 
@@ -115,6 +114,9 @@ module.exports = {
         title: 'Payment received',
         body: `We received your payment for order #${order.customOrderId}. Thank you!`,
         route: '/account',
+        channelId: 'default',
+        priority: 'high',
+        sound: 'default',
       },
     ];
   },
@@ -131,11 +133,14 @@ module.exports = {
         title: 'Order update',
         body: `Your order #${order.customOrderId} is ${text}.`,
         route: '/account',
+        channelId: 'default',
+        priority: 'high',
+        sound: 'default',
       },
     ];
   },
 
-  // emit('booking.created', { booking, req })  -> customer: booking received
+  // emit('booking.created', { booking, req })
   'booking.created': async ({ booking }) => {
     const userId = idOf(booking?.userId);
     if (!userId) return [];
@@ -146,40 +151,68 @@ module.exports = {
         title: 'Booking received',
         body: 'Finding the best decorator near you…',
         route: '/account',
+        channelId: 'default',
+        priority: 'high',
+        sound: 'default',
       },
     ];
   },
 
-  // emit('booking.status', { booking, status, seller?, cancelledBy? })  -> customer
+  // emit('booking.status', { booking, status, seller?, cancelledBy? })
   'booking.status': async ({ booking, status, seller, cancelledBy }) => {
     const userId = idOf(booking?.userId);
     if (!userId) return [];
 
-    // The customer cancelled it themselves, so no need to ping them about it
     if (status === 'cancelled' && cancelledBy === 'customer') return [];
 
     const build = BOOKING_CUSTOMER[status];
     if (!build) return [];
 
-    return [{ to: 'customer', id: userId, ...build(seller, cancelledBy), route: '/account' }];
-  },
-
-  // emit('booking.offer', { booking, seller })  -> the vendor this offer was just sent to
-  'booking.offer': async ({ booking, seller }) => {
-    const sellerId = idOf(seller);
-    if (!sellerId) return [];
     return [
       {
-        to: 'seller',
-        id: sellerId,
-        title: 'New decoration request',
-        body: booking?.pickupLocation?.address || `New ${booking?.bookingType || ''} decoration job. Tap to accept.`,
+        to: 'customer',
+        id: userId,
+        ...build(seller, cancelledBy),
         route: '/account',
+        channelId: 'default',
+        priority: 'high',
+        sound: 'default',
       },
     ];
   },
 
-  // emit('booking.seller_cancelled', { booking, sellerId })  -> vendor: customer cancelled their job
+  // emit('booking.offer', { booking, seller })
+  // UBER/OLA STYLE DISPATCH: Rings device with MAX priority, custom vibration, and native Accept/Decline action buttons
+  'booking.offer': async ({ booking, seller }) => {
+    const sellerId = idOf(seller);
+    if (!sellerId) return [];
+
+    const product = booking?.selectedProductId || {};
+    const priceText = product.price || booking?.estimatedPrice ? money(product.price || booking.estimatedPrice) : 'Job';
+    const location = booking?.pickupLocation?.city || booking?.pickupLocation?.address || 'Nearby';
+
+    return [
+      {
+        to: 'seller',
+        id: sellerId,
+        title: `🚨 NEW BOOKING OFFER (${priceText})`,
+        body: `${location} - Tap or choose an option to accept this request.`,
+        route: `/account?tab=jobs&bookingId=${booking._id}`,
+        channelId: 'booking_offers',
+        categoryId: 'booking_offer_actions',
+        priority: 'high',
+        sound: 'default',
+        data: {
+          bookingId: String(booking._id),
+          sellerId: String(sellerId),
+          type: 'BOOKING_OFFER',
+          route: `/account?tab=jobs&bookingId=${booking._id}`,
+        },
+      },
+    ];
+  },
+
+  // emit('booking.seller_cancelled', { booking, sellerId })
   'booking.seller_cancelled': async ({ booking, sellerId }) => {
     const id = idOf(sellerId);
     if (!id) return [];
@@ -190,13 +223,14 @@ module.exports = {
         title: 'Booking cancelled by customer',
         body: 'The customer cancelled this job. You are available for new requests again.',
         route: '/account',
+        channelId: 'default',
+        priority: 'high',
+        sound: 'default',
       },
     ];
   },
 
   // emit('chat.message', { chat, bookingId, senderType, senderName, text })
-  // senderType is "user" or "seller"; the OTHER person gets the notification.
-  // The route carries the booking id so tapping the notification opens that chat.
   'chat.message': async ({ chat, bookingId, senderType, senderName, text }) => {
     const toSeller = senderType === 'user';
     const id = idOf(toSeller ? chat?.sellerId : chat?.userId);
@@ -212,10 +246,28 @@ module.exports = {
         title: senderName || (toSeller ? 'Customer' : 'Your decorator'),
         body: preview || 'Sent you a message',
         route: `/account?tab=${toSeller ? 'jobs' : 'bookings'}&chat=${bookingId}`,
+        channelId: 'messages',
+        priority: 'high',
+        sound: 'default',
+        data: {
+          bookingId: String(bookingId),
+          route: `/account?tab=${toSeller ? 'jobs' : 'bookings'}&chat=${bookingId}`,
+        },
       },
     ];
   },
 
-  // emit('custom', { to, id, title, body, route })  -> one-off messages (admin, offers, tests)
-  custom: async ({ to, id, title, body, route = '/account' }) => [{ to, id, title, body, route }],
+  // emit('custom', { to, id, title, body, route })
+  custom: async ({ to, id, title, body, route = '/account' }) => [
+    {
+      to,
+      id,
+      title,
+      body,
+      route,
+      channelId: 'default',
+      priority: 'high',
+      sound: 'default',
+    },
+  ],
 };

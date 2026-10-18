@@ -35,8 +35,11 @@ async function emit(name, data = {}) {
         console.log(`[NOTIFY] ${name} -> ${m.to}: skipped (no "${MODEL_FOR[m.to]}" model or no id)`);
         continue;
       }
-      await notify(Model, m.id, { title: m.title, body: m.body, route: m.route });
-      console.log(`[NOTIFY] ${name} -> ${m.to}`);
+
+      // Pass EVERYTHING through (channelId, categoryId, priority, data, dataOnly, ttl...)
+      const { to, id, ...payload } = m;
+      await notify(Model, id, payload);
+      console.log(`[NOTIFY] ${name} -> ${to}`);
     }
   } catch (err) {
     console.error(`[NOTIFY] ${name} failed:`, err.message);
