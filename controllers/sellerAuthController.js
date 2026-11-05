@@ -431,7 +431,47 @@ exports.updateSellerDetails = async (req, res) => {
     res.status(500).json({ success: false, message: 'Error updating seller details' });
   }
 };
+// Admin override: force a seller Busy / Available.
+// Unlike toggleAllocationStatus (seller-side), this ignores the live-booking lock.
+// PATCH /api/seller/:id/allocation   body: { isAllocated: true|false }
+exports.setAllocationStatus = async (req, res) => {
+  try {
+    const { isAllocated } = req.body;
+    if (isAllocated === undefined) {
+      return res.status(400).json({ success: false, message: 'isAllocated is required.' });
+    }
+    const next = isAllocated === true || isAllocated === 'true';
 
+    const seller = await Seller.findByIdAndUpdate(
+      req.params.id,
+      { $set: { isAllocated: next } },
+      { new: true }
+    );
+    if (!seller) {
+      return res.status(404).json({ success: false, message: 'Seller profile not found' });
+    }
+
+    // Informational only: tell the admin if the vendor still has live jobs
+    const liveCount = await Booking.countDocuments({
+      sellerId: seller._id,
+      status: { $in: LIVE_BOOKING_STATUSES }
+    });
+
+    res.json({
+      success: true,
+      message: next
+        ? `${seller.name} marked as Busy.`
+        : liveCount > 0
+          ? `${seller.name} marked as Available (note: still has ${liveCount} live booking${liveCount > 1 ? 's' : ''}).`
+          : `${seller.name} marked as Available.`,
+      seller,
+      liveBookings: liveCount
+    });
+  } catch (error) {
+    console.error('setAllocationStatus error:', error);
+    res.status(500).json({ success: false, message: 'Error setting allocation status' });
+  }
+};
 exports.setApprovalStatus = async (req, res) => {
   try {
     const seller = await Seller.findByIdAndUpdate(

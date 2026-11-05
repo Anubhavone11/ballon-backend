@@ -33,5 +33,5 @@ router.patch('/:id/approve', auth, sellerAuthController.setApprovalStatus);
 router.patch('/:id/block', auth, sellerAuthController.setBlockedStatus);
 router.patch('/:id/premium', auth, sellerAuthController.updateSellerPremiumStatus);
 router.patch('/:id/add-payment', auth, sellerAuthController.addManualPayment);
-
+router.patch('/:id/allocation', auth, sellerAuthController.setAllocationStatus);
 module.exports = router;

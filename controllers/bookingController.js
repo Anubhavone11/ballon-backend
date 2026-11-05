@@ -229,7 +229,7 @@ const sendJobOfferToSeller = async (seller, booking) => {
                 { type: "text", parameter_name: "seller_name", text: seller.name || "Vendor" },
                 { type: "text", parameter_name: "customer_name", text: booking.serviceDetails?.name || "Customer" },
                 { type: "text", parameter_name: "product_name", text: product.name || "Decoration Package" },
-                { type: "text", parameter_name: "price", text: String(product.price || booking.estimatedPrice || "0") },
+               { type: "text", parameter_name: "price", text: String(booking.estimatedPrice || product.price || "0") },
                 { type: "text", parameter_name: "delivery_time", text: product.instantDeliveryTime || "30 mins" },
                 { type: "text", parameter_name: "venue_address", text: booking.pickupLocation?.address || "Address provided upon acceptance" },
               ],
@@ -1264,7 +1264,7 @@ const successPage = (booking, seller) => {
   const productId = product._id || booking.selectedProductId;
   const productUrl = productId ? `${APP_BASE_URL}/product/${productId}` : `${APP_BASE_URL}/shop`;
   const image = product.image?.url || product.image || "";
-  const price = formatINR(product.price || booking.estimatedPrice);
+  const price = formatINR(booking.estimatedPrice || product.price);
   const venue = booking.pickupLocation?.address || "";
   const customerName = booking.serviceDetails?.name || "";
   const customerPhone = booking.customerPhone ? normalizePhone(booking.customerPhone) : "";
