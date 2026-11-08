@@ -9,14 +9,18 @@ const fs = require('fs');
 const { createClient } = require('redis');
 const rateLimit = require('express-rate-limit');
 const { RedisStore } = require('rate-limit-redis');
-
+// Route Imports (top of file)
+// const wishlistRoutes = require('./routes/wishlist');
+const shoppingCartRoutes = require('./routes/shoppingcart');
 // Route Imports
+const personalizationRoutes = require('./routes/personalization');
 const shopRoutes = require('./routes/shop');
 const productRoutes = require('./routes/products');
 const orderRoutes = require('./routes/orders');
 const authRoutes = require('./routes/auth');
 const adminAuthRoutes = require('./routes/adminAuth');
 const lovedRoutes = require('./routes/loved');
+const wishlistRoutes = require('./routes/Wishlist');
 const categoryRoutes = require('./routes/category');
 const featuredProductRoutes = require('./routes/featuredProduct');
 const bestSellerRoutes = require('./routes/bestSeller');
@@ -293,10 +297,14 @@ async function startServer() {
     app.use('/api/featured-products', cacheMiddleware(180), featuredProductRoutes);
     app.use('/api/cities', cacheMiddleware(600), require('./routes/city')); // 10 mins
     app.use('/api/blog', cacheMiddleware(300), blogRoutes);
-
+app.use('/api/personalization', personalizationRoutes);
     // Dynamic & Non-cached Routes
     app.use('/api/activity-tracking', require('./routes/Activityroutes'));
     app.use('/api/shop', productRoutes);
+    // Dynamic & Non-cached Routes
+app.use('/api/shopping-cart', shoppingCartRoutes);
+app.use('/api/wishlist', wishlistRoutes);
+    
     app.use('/api/products', productRoutes);
     app.use('/api/orders', orderRoutes);
     app.use('/api/admin/bookings', adminBookingRoutes);

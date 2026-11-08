@@ -1,56 +1,68 @@
 const mongoose = require('mongoose');
 
-// Schema for individual items within an order
+// One line in the order. An order can hold many of these (one per package).
 const orderItemSchema = new mongoose.Schema({
   productId: { type: String, required: false },
   name: { type: String, required: true },
-  price: { type: Number, required: true },
-  quantity: { type: Number, required: true },
+  price: { type: Number, required: true, min: 0 },
+  quantity: { type: Number, required: true, min: 1 },
   image: { type: String, required: false }, // Store primary image for reference
 }, { _id: false });
 
 // Schema for optional add-ons
 const addOnSchema = new mongoose.Schema({
   name: { type: String, required: true },
-  price: { type: Number, required: true },
-  quantity: { type: Number, default: 1 },
-  image: { type: String, default: '' } 
+  price: { type: Number, required: true, min: 0 },
+  quantity: { type: Number, default: 1, min: 1 },
+  image: { type: String, default: '' }
 }, { _id: false });
-
 
 // Main schema for an order
 const orderSchema = new mongoose.Schema({
   customOrderId: { type: String, unique: true, index: true }, // Custom order ID like decorationcelebration1
   customerName: { type: String, required: true },
-  email: { type: String, required: true, index: true }, // Index for fast lookups
+  email: { type: String, required: true, index: true },
   phone: { type: String, required: true },
   address: {
     street: { type: String, required: true },
+    // FIX: the checkout sends `city`, the emails and WhatsApp message read it,
+    // but it was missing here so Mongoose silently dropped it.
+    city: { type: String, required: false, default: '' },
     pincode: { type: String, required: true },
     country: { type: String, required: true },
-    // NEW: For storing Google Maps location coordinates
     location: {
       type: {
         type: String,
-        enum: ['Point'], // 'location.type' must be 'Point'
+        enum: ['Point'],
         required: false
       },
       coordinates: {
-        type: [Number], // Array of numbers for [longitude, latitude]
+        type: [Number],
         required: false
       }
     }
   },
 
-  // NEW: For scheduling a specific delivery date and time
   scheduledDelivery: { type: Date, required: false },
 
-  items: [orderItemSchema], // Use the correct schema for items
+  // Many packages per order are allowed, but never zero.
+  items: {
+    type: [orderItemSchema],
+    validate: {
+      validator: (arr) => Array.isArray(arr) && arr.length > 0,
+      message: 'An order must contain at least one item.'
+    }
+  },
 
-  // NEW: Optional array for add-ons like gift wrap, etc.
   addOns: [addOnSchema],
 
   totalAmount: { type: Number, required: true },
+
+  // Sent by the checkout; stored so the admin and emails can show a full breakdown
+  shippingCost: { type: Number, default: 0 },
+  codExtraCharge: { type: Number, default: 0 },
+  finalTotal: { type: Number, default: 0 },
+
   paymentMethod: { type: String, required: true },
   orderStatus: {
     type: String,
@@ -62,16 +74,25 @@ const orderSchema = new mongoose.Schema({
     required: true,
     enum: ['pending', 'completed', 'failed', 'pending_upfront']
   },
-  upfrontAmount: { type: Number, default: 0 }, // Upfront payment amount for COD orders
-  remainingAmount: { type: Number, default: 0 }, // Remaining amount to be paid on delivery
-  sellerToken: { type: String, required: false }, // Track which seller referred this order
-  commission: { type: Number, default: 0 }, // Commission amount for this order
-  transactionId: { type: String, required: false }, // PhonePe transaction ID
-  phonepeMerchantOrderId: { type: String, required: false, index: true }, // For matching PhonePe webhook callbacks
-  couponCode: { type: String, required: false }, // Coupon code if applied
+  upfrontAmount: { type: Number, default: 0 },
+  remainingAmount: { type: Number, default: 0 },
+  sellerToken: { type: String, required: false },
+  commission: { type: Number, default: 0 },
+  transactionId: { type: String, required: false },
+  phonepeMerchantOrderId: { type: String, required: false, index: true },
+  couponCode: { type: String, required: false },
 }, { timestamps: true });
 
-// NEW: Add a 2dsphere index for efficient location-based queries
+// Handy for lists and notifications: total number of packages in the order
+orderSchema.virtual('itemCount').get(function () {
+  return (this.items || []).reduce((sum, i) => sum + (i.quantity || 0), 0);
+});
+orderSchema.set('toObject', { virtuals: true });
+orderSchema.set('toJSON', { virtuals: true });
+
+// Find orders that contain a given product (admin reports)
+orderSchema.index({ 'items.productId': 1 });
+
 orderSchema.index({ 'address.location': '2dsphere' });
 
 module.exports = mongoose.model('Order', orderSchema);

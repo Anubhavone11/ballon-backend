@@ -208,7 +208,137 @@ const sendOrderConfirmationWhatsApp = async (order) => {
   }
 };
 
-// Create a new order
+// ---------- Multi-item helpers ----------
+const MAX_LINE_ITEMS = 20;       // different packages in one order
+const MAX_QTY_PER_ITEM = 10;     // quantity of one package
+const OBJECT_ID_RE = /^[a-f\d]{24}$/i;
+
+// If your products have city-specific prices, the price the customer saw can differ
+// from Product.price. Keep this false (log only). Set true to reject mismatches.
+const ENFORCE_DB_PRICES = false;
+
+// Earliest allowed booking: now + this many minutes (0 = any later time today).
+// The checkout page allows same-day slots, so the old "tomorrow or later" rule was rejecting them.
+const MIN_LEAD_MINUTES = 0;
+
+// Validates every line, merges duplicates of the same product, caps sizes.
+const sanitizeItems = (rawItems) => {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) {
+    return { error: 'Items array is required and must not be empty.' };
+  }
+
+  const merged = new Map();
+  for (let i = 0; i < rawItems.length; i++) {
+    const item = rawItems[i] || {};
+    const name = typeof item.name === 'string' ? item.name.trim() : '';
+    const price = Number(item.price);
+    const quantity = Number(item.quantity);
+
+    if (!name || !Number.isFinite(price) || price < 0 || !Number.isInteger(quantity) || quantity < 1) {
+      return { error: `Item ${i + 1} is invalid (needs a name, a price and a whole-number quantity of at least 1).` };
+    }
+
+    const productId = item.productId ? String(item.productId) : null;
+    if (productId && !OBJECT_ID_RE.test(productId)) {
+      return { error: `Item ${i + 1} has an invalid product id.` };
+    }
+
+    const key = productId || `name:${name}`;
+    const existing = merged.get(key);
+    if (existing) {
+      existing.quantity += quantity; // same package sent twice -> one line
+    } else {
+      merged.set(key, { productId, name, price, quantity, image: item.image || '' });
+    }
+  }
+
+  const list = [...merged.values()];
+  if (list.length > MAX_LINE_ITEMS) {
+    return { error: `You can book up to ${MAX_LINE_ITEMS} different packages in one order.` };
+  }
+  if (list.some((i) => i.quantity > MAX_QTY_PER_ITEM)) {
+    return { error: `You can book up to ${MAX_QTY_PER_ITEM} of the same package in one order.` };
+  }
+  return { items: list };
+};
+
+// One DB round trip for all products: exists, active, in stock, enough quantity.
+const checkAvailability = async (items) => {
+  const ids = items.filter((i) => i.productId).map((i) => i.productId);
+  if (!ids.length) return { ok: true, products: new Map() };
+
+  const products = await Product.find({ _id: { $in: ids } })
+    .select('name price stock inStock isActive')
+    .lean();
+  const byId = new Map(products.map((p) => [String(p._id), p]));
+
+  for (const item of items) {
+    if (!item.productId) continue;
+    const p = byId.get(item.productId);
+
+    if (!p || p.isActive === false) {
+      return { ok: false, status: 409, message: `"${item.name}" is no longer available. Please remove it and try again.` };
+    }
+    if (p.inStock === false || p.stock === 0) {
+      return { ok: false, status: 409, message: `"${item.name}" is fully booked right now.` };
+    }
+    if (typeof p.stock === 'number' && p.stock < item.quantity) {
+      return { ok: false, status: 409, message: `Only ${p.stock} of "${item.name}" ${p.stock === 1 ? 'is' : 'are'} available.` };
+    }
+    if (Number.isFinite(Number(p.price)) && Math.abs(Number(p.price) - item.price) > 0.5) {
+      console.warn(`[Order] Price mismatch for ${item.productId}: client=${item.price} db=${p.price}`);
+      if (ENFORCE_DB_PRICES) {
+        return { ok: false, status: 409, message: `The price of "${item.name}" has changed. Please refresh and try again.` };
+      }
+    }
+  }
+  return { ok: true, products: byId };
+};
+
+// Puts reserved stock back (used when a later step fails).
+const releaseStock = async (reserved) => {
+  await Promise.all(
+    reserved.map(({ id, qty }) =>
+      Product.updateOne({ _id: id }, { $inc: { stock: qty } }).catch((err) =>
+        console.error(`[Order] Failed to release stock for ${id}:`, err.message)
+      )
+    )
+  );
+};
+
+// Atomic per-product decrement ("only if stock >= qty"), so two customers
+// booking the last slot at the same time cannot both succeed. Rolls back on failure.
+const reserveStock = async (items, productMap) => {
+  const reserved = [];
+
+  for (const item of items) {
+    if (!item.productId) continue;
+    const p = productMap.get(item.productId);
+    if (!p || typeof p.stock !== 'number') continue; // product doesn't track stock
+
+    const r = await Product.updateOne(
+      { _id: item.productId, stock: { $gte: item.quantity } },
+      { $inc: { stock: -item.quantity } }
+    );
+    const changed = (r.modifiedCount ?? r.nModified ?? 0) === 1;
+
+    if (!changed) {
+      await releaseStock(reserved);
+      return { ok: false, message: `"${item.name}" was just booked by someone else. Please try again.` };
+    }
+    reserved.push({ id: item.productId, qty: item.quantity });
+  }
+
+  if (reserved.length) {
+    await Product.updateMany(
+      { _id: { $in: reserved.map((r) => r.id) }, stock: { $lte: 0 } },
+      { $set: { inStock: false } }
+    );
+  }
+  return { ok: true, reserved };
+};
+
+// ---------- Create a new order (single or multiple items) ----------
 const createOrder = async (req, res) => {
   try {
     console.log('=== ORDER CREATION REQUEST ===');
@@ -225,6 +355,9 @@ const createOrder = async (req, res) => {
       paymentStatus,
       upfrontAmount,
       remainingAmount,
+      shippingCost,
+      codExtraCharge,
+      finalTotal,
       sellerToken,
       transactionId,
       couponCode,
@@ -232,15 +365,13 @@ const createOrder = async (req, res) => {
       addOns,
     } = req.body;
 
-    // Default paymentStatus if missing from frontend checkout payload
     if (!paymentStatus) {
       paymentStatus = paymentMethod === 'cod' ? 'pending_upfront' : 'pending';
     }
 
     // Required fields check
     const requiredFields = { customerName, email, phone, address, items, totalAmount, paymentMethod, paymentStatus };
-    const missingFields = Object.keys(requiredFields).filter(field => !requiredFields[field]);
-
+    const missingFields = Object.keys(requiredFields).filter((field) => !requiredFields[field]);
     if (missingFields.length > 0) {
       return res.status(400).json({
         success: false,
@@ -248,68 +379,46 @@ const createOrder = async (req, res) => {
       });
     }
 
-    // Validate items array
-    if (!Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Items array is required and must not be empty.'
-      });
+    if (!Number.isFinite(Number(totalAmount)) || Number(totalAmount) < 0) {
+      return res.status(400).json({ success: false, message: 'Invalid total amount.' });
     }
 
-    // Clean & validate item objects
-    const cleanedItems = [];
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      if (!item.name || item.price === undefined || item.quantity === undefined) {
-        return res.status(400).json({
-          success: false,
-          message: `Item ${i + 1} is missing required fields (name, price, or quantity).`
-        });
-      }
-
-      cleanedItems.push({
-        productId: item.productId || null,
-        name: String(item.name),
-        price: Number(item.price),
-        quantity: Number(item.quantity),
-        image: item.image || ''
-      });
+    // 1) Validate + merge the items
+    const sanitized = sanitizeItems(items);
+    if (sanitized.error) {
+      return res.status(400).json({ success: false, message: sanitized.error });
     }
+    const cleanedItems = sanitized.items;
 
-    // Clean addOns array if present
+    // 2) Clean add-ons
     let cleanedAddOns = [];
     if (Array.isArray(addOns)) {
-      cleanedAddOns = addOns.map(addon => ({
-        name: String(addon.name),
-        price: Number(addon.price || 0),
-        quantity: Number(addon.quantity || 1),
-        image: addon.image || ''
-      }));
+      cleanedAddOns = addOns
+        .filter((a) => a && a.name)
+        .map((addon) => ({
+          name: String(addon.name),
+          price: Math.max(0, Number(addon.price || 0)),
+          quantity: Math.max(1, parseInt(addon.quantity, 10) || 1),
+          image: addon.image || ''
+        }));
     }
 
-    // Process scheduled delivery with IST timezone handling
+    // 3) Scheduled delivery (IST business hours; same-day allowed)
     let processedScheduledDelivery = null;
     if (scheduledDelivery) {
       const deliveryDate = new Date(scheduledDelivery);
       if (isNaN(deliveryDate.getTime())) {
+        return res.status(400).json({ success: false, message: 'Invalid scheduled delivery date format.' });
+      }
+
+      if (deliveryDate.getTime() < Date.now() + MIN_LEAD_MINUTES * 60 * 1000) {
         return res.status(400).json({
           success: false,
-          message: 'Invalid scheduled delivery date format.'
+          message: 'That time slot has already passed. Please choose a later slot.'
         });
       }
 
       const deliveryDateIST = new Date(deliveryDate.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-      const minDeliveryDate = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-      minDeliveryDate.setHours(0, 0, 0, 0);
-      minDeliveryDate.setDate(minDeliveryDate.getDate() + 1);
-
-      if (deliveryDateIST < minDeliveryDate) {
-        return res.status(400).json({
-          success: false,
-          message: 'Scheduled delivery must be at least 1 day in the future.'
-        });
-      }
-
       const deliveryHourIST = deliveryDateIST.getHours();
       if (deliveryHourIST < 9 || deliveryHourIST > 21) {
         return res.status(400).json({
@@ -321,7 +430,13 @@ const createOrder = async (req, res) => {
       processedScheduledDelivery = deliveryDate;
     }
 
-    // Generate custom order ID
+    // 4) Check every package is bookable
+    const availability = await checkAvailability(cleanedItems);
+    if (!availability.ok) {
+      return res.status(availability.status || 409).json({ success: false, message: availability.message });
+    }
+
+    // 5) Custom order id
     let customOrderId;
     try {
       const orderNumber = await Counter.getNextSequence('order');
@@ -340,6 +455,9 @@ const createOrder = async (req, res) => {
       items: cleanedItems,
       addOns: cleanedAddOns,
       totalAmount: Number(totalAmount),
+      shippingCost: Number(shippingCost) || 0,
+      codExtraCharge: Number(codExtraCharge) || 0,
+      finalTotal: Number(finalTotal) || Number(totalAmount),
       paymentMethod,
       paymentStatus,
       upfrontAmount: upfrontAmount ? Number(upfrontAmount) : 0,
@@ -350,15 +468,30 @@ const createOrder = async (req, res) => {
       scheduledDelivery: processedScheduledDelivery,
     });
 
-    const savedOrder = await newOrder.save();
+    // Validate BEFORE touching stock so a bad payload never holds inventory
+    await newOrder.validate();
 
-    // Sanity check right after save: confirms whether `phone` actually
-    // made it into the persisted document (schema issues show up here).
+    // 6) Reserve stock for all packages atomically (rolls back if any one fails)
+    const stock = await reserveStock(cleanedItems, availability.products);
+    if (!stock.ok) {
+      return res.status(409).json({ success: false, message: stock.message });
+    }
+
+    // 7) Save; if saving fails, give the stock back
+    let savedOrder;
+    try {
+      savedOrder = await newOrder.save();
+    } catch (saveErr) {
+      await releaseStock(stock.reserved);
+      throw saveErr;
+    }
+
     console.log(
-      `[Order] Saved #${savedOrder.customOrderId} — phone on saved doc: "${savedOrder.phone}"`
+      `[Order] Saved #${savedOrder.customOrderId} with ${savedOrder.items.length} package(s), ` +
+      `phone on saved doc: "${savedOrder.phone}"`
     );
 
-    // Commission logic
+    // 8) Commission logic (unchanged)
     let commission = 0;
     let seller = null;
     if (sellerToken) {
@@ -374,28 +507,11 @@ const createOrder = async (req, res) => {
       }
     }
 
-    // Update product stock
-    for (const item of cleanedItems) {
-      if (item.productId) {
-        try {
-          const product = await Product.findById(item.productId);
-          if (product) {
-            product.stock = Math.max(0, (product.stock || 0) - (item.quantity || 1));
-            if (product.stock === 0) product.inStock = false;
-            await product.save();
-          }
-        } catch (productError) {
-          console.error(`Error updating stock for product ${item.productId}:`, productError);
-        }
-      }
-    }
+    // 9) Non-blocking background operations
+    appendOrderToJson(savedOrder).catch((err) => console.error('JSON backup failed:', err));
+    sendOrderConfirmationEmail(savedOrder).catch((err) => console.error('Email notification failed:', err));
+    sendOrderConfirmationWhatsApp(savedOrder).catch((err) => console.error('WhatsApp notification failed:', err));
 
-    // Non-blocking background operations
-    appendOrderToJson(savedOrder).catch(err => console.error('JSON backup failed:', err));
-    sendOrderConfirmationEmail(savedOrder).catch(err => console.error('Email notification failed:', err));
-    sendOrderConfirmationWhatsApp(savedOrder).catch(err => console.error('WhatsApp notification failed:', err));
-
-    // In-app + phone push notification (customer, and the partner if their link was used)
     emit('order.created', { order: savedOrder, req, seller, commission });
 
     const orderResponse = {
