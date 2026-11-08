@@ -1,5 +1,5 @@
 'use strict';
-const UserCart = require('../models/UserCart');
+const UserCart = require('../models/Usercart');
 const Product = require('../models/Product');
 
 const MAX_QTY_PER_ITEM = 10;
