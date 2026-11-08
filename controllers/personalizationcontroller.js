@@ -1,7 +1,7 @@
 'use strict';
 const ProductView = require('../models/Productview');
 const Wishlist = require('../models/Wishlist');
-const UserCart = require('../models/UserCart');
+const UserCart = require('../models/Usercart');
 const Product = require('../models/Product');
 
 /* ── Assumptions about your Product schema (edit if names differ) ──────────
