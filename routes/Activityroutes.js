@@ -4,6 +4,7 @@ const router = express.Router();
 const jwt = require('jsonwebtoken');
 const { auth } = require('../middleware/auth'); // Admin check middleware
 const {
+  trackProductView,
   trackCheckoutStarted,
   trackCheckoutCompleted,
   getLoginStatus,
@@ -36,9 +37,11 @@ const optionalCustomerAuth = (req, res, next) => {
 // ============================================================================
 // 1. EVENT INGESTION (Accessible by users & guests - No admin middleware)
 // ============================================================================
+router.post('/product-view', optionalCustomerAuth, trackProductView);
 router.post('/checkout-started', optionalCustomerAuth, trackCheckoutStarted);
 router.post('/checkout-completed', optionalCustomerAuth, trackCheckoutCompleted);
 router.post('/whatsapp-inquiry', optionalCustomerAuth, trackWhatsAppInquiry);
+
 // ============================================================================
 // 2. ADMIN-ONLY REPORTS (Protected by auth middleware)
 // ============================================================================

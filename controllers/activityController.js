@@ -49,6 +49,33 @@ async function trackWhatsAppInquiry(req, res) {
     return res.status(500).json({ success: false, message: err.message });
   }
 }
+// POST /api/activity-tracking/product-view
+async function trackProductView(req, res) {
+  try {
+    const userId = req.user?.id || req.user?._id || null;
+    const { productId, productName, category, city } = req.body;
+
+    if (!productId) {
+      return res.status(400).json({ success: false, message: 'productId is required' });
+    }
+
+    await ActivityLog.create({
+      user: userId,
+      action: 'product_view', // Matches getMostViewedProducts, getUserProductHistory & getCheckoutFunnel
+      product: productId,
+      metadata: {
+        productName: productName || null,
+        category: category || null,
+        city: city || null,
+      },
+    });
+
+    return res.status(200).json({ success: true, message: 'Product view recorded' });
+  } catch (err) {
+    console.error('Error logging product_view:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+}
 // POST /api/activity-tracking/checkout-completed
 async function trackCheckoutCompleted(req, res) {
   try {
@@ -267,6 +294,7 @@ async function getCheckoutFunnel(req, res) {
 }
 
 module.exports = {
+  trackProductView,
   trackCheckoutStarted,
   trackCheckoutCompleted,
   getLoginStatus,
