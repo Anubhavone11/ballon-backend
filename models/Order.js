@@ -25,9 +25,9 @@ const orderSchema = new mongoose.Schema({
   phone: { type: String, required: true },
   address: {
     street: { type: String, required: true },
-    // FIX: the checkout sends `city`, the emails and WhatsApp message read it,
-    // but it was missing here so Mongoose silently dropped it.
     city: { type: String, required: false, default: '' },
+    // The admin Orders page filters on address.state; without this field Mongoose drops it.
+    state: { type: String, required: false, default: '' },
     pincode: { type: String, required: true },
     country: { type: String, required: true },
     location: {
@@ -67,13 +67,19 @@ const orderSchema = new mongoose.Schema({
   orderStatus: {
     type: String,
     default: 'processing',
-    enum: ['processing', 'confirmed', 'manufacturing', 'shipped', 'delivered']
+    enum: ['processing', 'confirmed', 'manufacturing', 'shipped', 'delivered', 'cancelled']
   },
   paymentStatus: {
     type: String,
     required: true,
-    enum: ['pending', 'completed', 'failed', 'pending_upfront']
+    enum: ['pending', 'completed', 'failed', 'pending_upfront', 'refund_pending', 'refunded']
   },
+
+  // Cancellation details
+  cancelledAt: { type: Date },
+  cancelReason: { type: String, default: '' },
+  cancelledBy: { type: String, enum: ['admin', 'customer'] },
+
   upfrontAmount: { type: Number, default: 0 },
   remainingAmount: { type: Number, default: 0 },
   sellerToken: { type: String, required: false },

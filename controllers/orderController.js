@@ -3,7 +3,7 @@ const Counter = require('../models/Counter');
 const Seller = require('../models/Seller');
 const Product = require('../models/Product');
 const commissionController = require('./commissionController');
-const { emit } = require('../notifications'); // <-- NEW: notification system
+const { emit } = require('../notifications'); // notification system
 const nodemailer = require('nodemailer');
 const axios = require('axios');
 const fs = require('fs').promises;
@@ -26,9 +26,9 @@ const formatScheduledDelivery = (scheduledDelivery) => {
       day: 'numeric',
       hour: 'numeric',
       minute: '2-digit',
-      hour12: true
+      hour12: true,
     }),
-    timestamp: deliveryDate.getTime()
+    timestamp: deliveryDate.getTime(),
   };
 };
 
@@ -62,7 +62,7 @@ const deleteOrder = async (req, res) => {
       const data = await fs.readFile(ordersJsonPath, 'utf8');
       let orders = JSON.parse(data);
       if (Array.isArray(orders)) {
-        orders = orders.filter(o => o._id?.toString() !== id);
+        orders = orders.filter((o) => o._id?.toString() !== id);
         await fs.writeFile(ordersJsonPath, JSON.stringify(orders, null, 2));
       }
     } catch (jsonErr) {
@@ -72,30 +72,27 @@ const deleteOrder = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: 'Order deleted successfully.',
-      order: deletedOrder
+      order: deletedOrder,
     });
   } catch (error) {
     console.error('Error deleting order:', error);
     return res.status(500).json({
       success: false,
       message: 'Failed to delete order.',
-      error: error.message
+      error: error.message,
     });
   }
 };
 
 // Send Order Confirmation via WhatsApp Cloud API
 const sendOrderConfirmationWhatsApp = async (order) => {
-  // Declared outside the try block so the catch handler can log the
-  // exact payload that was (or would have been) sent to Meta.
   let payload = null;
 
   try {
-    // --- Preflight: catch silent misconfiguration before calling out ---
     if (!process.env.WA_PHONE_NUMBER_ID || !process.env.WA_ACCESS_TOKEN) {
       console.error(
         `[WhatsApp] Skipping order #${order.customOrderId}: ` +
-        `WA_PHONE_NUMBER_ID or WA_ACCESS_TOKEN is not set in the environment.`
+          `WA_PHONE_NUMBER_ID or WA_ACCESS_TOKEN is not set in the environment.`
       );
       return false;
     }
@@ -103,24 +100,22 @@ const sendOrderConfirmationWhatsApp = async (order) => {
     if (!order.phone) {
       console.warn(
         `[WhatsApp] Skipping order #${order.customOrderId}: ` +
-        `No phone number on the saved order (order.phone is falsy).`
+          `No phone number on the saved order (order.phone is falsy).`
       );
       return false;
     }
 
     const recipientPhone = normalizePhone(order.phone);
 
-    // Log the raw vs normalized phone so malformed numbers are obvious
-    // (e.g. missing digits, extra symbols, 9 or 11 digit values).
     console.log(
       `[WhatsApp] Order #${order.customOrderId} — raw phone="${order.phone}" ` +
-      `normalized="${recipientPhone}" (length=${recipientPhone.length})`
+        `normalized="${recipientPhone}" (length=${recipientPhone.length})`
     );
 
     if (recipientPhone.length < 11 || recipientPhone.length > 13) {
       console.warn(
         `[WhatsApp] Order #${order.customOrderId}: normalized phone ` +
-        `"${recipientPhone}" has an unexpected length — message will likely fail silently on Meta's side.`
+          `"${recipientPhone}" has an unexpected length — message will likely fail silently on Meta's side.`
       );
     }
 
@@ -156,10 +151,6 @@ const sendOrderConfirmationWhatsApp = async (order) => {
       type: 'template',
       template: {
         name: 'decoryy_order_confirmation',
-        // NOTE: Meta templates are very often registered as a region-specific
-        // locale (e.g. "en_US") rather than plain "en". If messages are
-        // silently failing with error code 132001 ("template not found"),
-        // change this to match exactly what's approved in Meta Business Manager.
         language: { code: 'en' },
         components: [
           {
@@ -194,9 +185,6 @@ const sendOrderConfirmationWhatsApp = async (order) => {
     );
     return true;
   } catch (err) {
-    // Log the full Meta error body (error code + message) AND the exact
-    // payload that triggered it, so a failure can be diagnosed from logs
-    // alone without needing to reproduce it.
     console.error(
       `[WhatsApp] Failed to send order notification for #${order?.customOrderId}:`,
       JSON.stringify(err.response?.data || { message: err.message }, null, 2)
@@ -208,17 +196,95 @@ const sendOrderConfirmationWhatsApp = async (order) => {
   }
 };
 
+// Send Order Status Update via WhatsApp Cloud API
+const sendOrderStatusWhatsApp = async (order) => {
+  let payload = null;
+
+  try {
+    if (!process.env.WA_PHONE_NUMBER_ID || !process.env.WA_ACCESS_TOKEN) {
+      console.error(
+        `[WhatsApp] Skipping status update for #${order.customOrderId}: ` +
+          `WA_PHONE_NUMBER_ID or WA_ACCESS_TOKEN is not set in the environment.`
+      );
+      return false;
+    }
+
+    if (!order.phone) {
+      console.warn(
+        `[WhatsApp] Skipping status update for #${order.customOrderId}: ` +
+          `No phone number on the order.`
+      );
+      return false;
+    }
+
+    const recipientPhone = normalizePhone(order.phone);
+
+    if (recipientPhone.length < 11 || recipientPhone.length > 13) {
+      console.warn(
+        `[WhatsApp] Status update for #${order.customOrderId}: normalized phone ` +
+          `"${recipientPhone}" has an unexpected length.`
+      );
+    }
+
+    // Format status nicely (e.g., "out_for_delivery" -> "Out For Delivery")
+    const formattedStatus = String(order.orderStatus || 'updated')
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, (char) => char.toUpperCase());
+
+    payload = {
+      messaging_product: 'whatsapp',
+      to: recipientPhone,
+      type: 'template',
+      template: {
+        name: 'decoryy_order_status', // Create & approve this template in Meta WhatsApp Manager
+        language: { code: 'en' },
+        components: [
+          {
+            type: 'body',
+            parameters: [
+              { type: 'text', text: order.customerName || 'Customer' }, // {{1}}
+              { type: 'text', text: String(order.customOrderId) },      // {{2}}
+              { type: 'text', text: formattedStatus },                  // {{3}}
+            ],
+          },
+        ],
+      },
+    };
+
+    const response = await axios.post(
+      `https://graph.facebook.com/v23.0/${process.env.WA_PHONE_NUMBER_ID}/messages`,
+      payload,
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.WA_ACCESS_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    console.log(
+      `[WhatsApp] Status update (${formattedStatus}) sent for #${order.customOrderId}:`,
+      response.data?.messages?.[0]?.id
+    );
+    return true;
+  } catch (err) {
+    console.error(
+      `[WhatsApp] Failed to send status update for #${order?.customOrderId}:`,
+      JSON.stringify(err.response?.data || { message: err.message }, null, 2)
+    );
+    if (payload) {
+      console.error('[WhatsApp] Status payload that failed:', JSON.stringify(payload, null, 2));
+    }
+    return false;
+  }
+};
+
 // ---------- Multi-item helpers ----------
-const MAX_LINE_ITEMS = 20;       // different packages in one order
-const MAX_QTY_PER_ITEM = 10;     // quantity of one package
+const MAX_LINE_ITEMS = 20;   // different packages in one order
+const MAX_QTY_PER_ITEM = 10; // quantity of one package
 const OBJECT_ID_RE = /^[a-f\d]{24}$/i;
 
-// If your products have city-specific prices, the price the customer saw can differ
-// from Product.price. Keep this false (log only). Set true to reject mismatches.
 const ENFORCE_DB_PRICES = false;
-
-// Earliest allowed booking: now + this many minutes (0 = any later time today).
-// The checkout page allows same-day slots, so the old "tomorrow or later" rule was rejecting them.
 const MIN_LEAD_MINUTES = 0;
 
 // Validates every line, merges duplicates of the same product, caps sizes.
@@ -235,7 +301,9 @@ const sanitizeItems = (rawItems) => {
     const quantity = Number(item.quantity);
 
     if (!name || !Number.isFinite(price) || price < 0 || !Number.isInteger(quantity) || quantity < 1) {
-      return { error: `Item ${i + 1} is invalid (needs a name, a price and a whole-number quantity of at least 1).` };
+      return {
+        error: `Item ${i + 1} is invalid (needs a name, a price and a whole-number quantity of at least 1).`,
+      };
     }
 
     const productId = item.productId ? String(item.productId) : null;
@@ -246,7 +314,7 @@ const sanitizeItems = (rawItems) => {
     const key = productId || `name:${name}`;
     const existing = merged.get(key);
     if (existing) {
-      existing.quantity += quantity; // same package sent twice -> one line
+      existing.quantity += quantity;
     } else {
       merged.set(key, { productId, name, price, quantity, image: item.image || '' });
     }
@@ -277,18 +345,30 @@ const checkAvailability = async (items) => {
     const p = byId.get(item.productId);
 
     if (!p || p.isActive === false) {
-      return { ok: false, status: 409, message: `"${item.name}" is no longer available. Please remove it and try again.` };
+      return {
+        ok: false,
+        status: 409,
+        message: `"${item.name}" is no longer available. Please remove it and try again.`,
+      };
     }
     if (p.inStock === false || p.stock === 0) {
       return { ok: false, status: 409, message: `"${item.name}" is fully booked right now.` };
     }
     if (typeof p.stock === 'number' && p.stock < item.quantity) {
-      return { ok: false, status: 409, message: `Only ${p.stock} of "${item.name}" ${p.stock === 1 ? 'is' : 'are'} available.` };
+      return {
+        ok: false,
+        status: 409,
+        message: `Only ${p.stock} of "${item.name}" ${p.stock === 1 ? 'is' : 'are'} available.`,
+      };
     }
     if (Number.isFinite(Number(p.price)) && Math.abs(Number(p.price) - item.price) > 0.5) {
       console.warn(`[Order] Price mismatch for ${item.productId}: client=${item.price} db=${p.price}`);
       if (ENFORCE_DB_PRICES) {
-        return { ok: false, status: 409, message: `The price of "${item.name}" has changed. Please refresh and try again.` };
+        return {
+          ok: false,
+          status: 409,
+          message: `The price of "${item.name}" has changed. Please refresh and try again.`,
+        };
       }
     }
   }
@@ -306,15 +386,14 @@ const releaseStock = async (reserved) => {
   );
 };
 
-// Atomic per-product decrement ("only if stock >= qty"), so two customers
-// booking the last slot at the same time cannot both succeed. Rolls back on failure.
+// Atomic per-product decrement ("only if stock >= qty")
 const reserveStock = async (items, productMap) => {
   const reserved = [];
 
   for (const item of items) {
     if (!item.productId) continue;
     const p = productMap.get(item.productId);
-    if (!p || typeof p.stock !== 'number') continue; // product doesn't track stock
+    if (!p || typeof p.stock !== 'number') continue;
 
     const r = await Product.updateOne(
       { _id: item.productId, stock: { $gte: item.quantity } },
@@ -369,13 +448,21 @@ const createOrder = async (req, res) => {
       paymentStatus = paymentMethod === 'cod' ? 'pending_upfront' : 'pending';
     }
 
-    // Required fields check
-    const requiredFields = { customerName, email, phone, address, items, totalAmount, paymentMethod, paymentStatus };
+    const requiredFields = {
+      customerName,
+      email,
+      phone,
+      address,
+      items,
+      totalAmount,
+      paymentMethod,
+      paymentStatus,
+    };
     const missingFields = Object.keys(requiredFields).filter((field) => !requiredFields[field]);
     if (missingFields.length > 0) {
       return res.status(400).json({
         success: false,
-        message: `Missing required fields: ${missingFields.join(', ')}`
+        message: `Missing required fields: ${missingFields.join(', ')}`,
       });
     }
 
@@ -399,7 +486,7 @@ const createOrder = async (req, res) => {
           name: String(addon.name),
           price: Math.max(0, Number(addon.price || 0)),
           quantity: Math.max(1, parseInt(addon.quantity, 10) || 1),
-          image: addon.image || ''
+          image: addon.image || '',
         }));
     }
 
@@ -414,7 +501,7 @@ const createOrder = async (req, res) => {
       if (deliveryDate.getTime() < Date.now() + MIN_LEAD_MINUTES * 60 * 1000) {
         return res.status(400).json({
           success: false,
-          message: 'That time slot has already passed. Please choose a later slot.'
+          message: 'That time slot has already passed. Please choose a later slot.',
         });
       }
 
@@ -423,7 +510,7 @@ const createOrder = async (req, res) => {
       if (deliveryHourIST < 9 || deliveryHourIST > 21) {
         return res.status(400).json({
           success: false,
-          message: 'Scheduled delivery time must be between 9:00 AM and 9:00 PM.'
+          message: 'Scheduled delivery time must be between 9:00 AM and 9:00 PM.',
         });
       }
 
@@ -468,10 +555,9 @@ const createOrder = async (req, res) => {
       scheduledDelivery: processedScheduledDelivery,
     });
 
-    // Validate BEFORE touching stock so a bad payload never holds inventory
     await newOrder.validate();
 
-    // 6) Reserve stock for all packages atomically (rolls back if any one fails)
+    // 6) Reserve stock for all packages atomically
     const stock = await reserveStock(cleanedItems, availability.products);
     if (!stock.ok) {
       return res.status(409).json({ success: false, message: stock.message });
@@ -488,10 +574,10 @@ const createOrder = async (req, res) => {
 
     console.log(
       `[Order] Saved #${savedOrder.customOrderId} with ${savedOrder.items.length} package(s), ` +
-      `phone on saved doc: "${savedOrder.phone}"`
+        `phone on saved doc: "${savedOrder.phone}"`
     );
 
-    // 8) Commission logic (unchanged)
+    // 8) Commission logic
     let commission = 0;
     let seller = null;
     if (sellerToken) {
@@ -499,7 +585,12 @@ const createOrder = async (req, res) => {
       if (seller) {
         commission = Number(totalAmount) * 0.30;
         try {
-          await commissionController.createCommissionEntry(savedOrder._id, seller._id, Number(totalAmount), 0.30);
+          await commissionController.createCommissionEntry(
+            savedOrder._id,
+            seller._id,
+            Number(totalAmount),
+            0.30
+          );
           console.log(`Commission entry created for seller ${seller.businessName}: ₹${commission}`);
         } catch (commissionError) {
           console.error('Failed to create commission entry:', commissionError);
@@ -516,33 +607,284 @@ const createOrder = async (req, res) => {
 
     const orderResponse = {
       ...savedOrder.toObject(),
-      scheduledDeliveryFormatted: formatScheduledDelivery(savedOrder.scheduledDelivery)
+      scheduledDeliveryFormatted: formatScheduledDelivery(savedOrder.scheduledDelivery),
     };
 
     return res.status(201).json({
       success: true,
       message: 'Order created successfully!',
       order: orderResponse,
-      commission: seller ? { amount: commission, sellerName: seller.businessName } : null
+      commission: seller ? { amount: commission, sellerName: seller.businessName } : null,
     });
-
   } catch (error) {
     console.error('Error creating order:', error);
     return res.status(error.name === 'ValidationError' ? 400 : 500).json({
       success: false,
       message: error.message || 'Failed to create order.',
-      error: error.message
+      error: error.message,
     });
+  }
+};
+
+// ---------- Update Order Status (Admin / System) ----------
+const updateOrderStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { orderStatus, paymentStatus } = req.body;
+
+    if (!OBJECT_ID_RE.test(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid order id.' });
+    }
+
+    if (!orderStatus && !paymentStatus) {
+      return res.status(400).json({
+        success: false,
+        message: 'Provide orderStatus or paymentStatus to update.',
+      });
+    }
+
+    const existingOrder = await Order.findById(id);
+    if (!existingOrder) {
+      return res.status(404).json({ success: false, message: 'Order not found.' });
+    }
+
+    const updates = {};
+    if (orderStatus) updates.orderStatus = orderStatus;
+    if (paymentStatus) updates.paymentStatus = paymentStatus;
+
+    const updatedOrder = await Order.findByIdAndUpdate(
+      id,
+      { $set: updates },
+      { new: true, runValidators: true }
+    );
+
+    updateOrderInJson(updatedOrder);
+
+    // Notify customer via Email, Push, and WhatsApp whenever orderStatus actually changes
+    if (orderStatus && orderStatus !== existingOrder.orderStatus) {
+      sendOrderStatusUpdateEmail(updatedOrder).catch((err) =>
+        console.error('Status update notification failed:', err)
+      );
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Order status updated successfully.',
+      order: {
+        ...updatedOrder.toObject(),
+        scheduledDeliveryFormatted: formatScheduledDelivery(updatedOrder.scheduledDelivery),
+      },
+    });
+  } catch (error) {
+    console.error('Error updating order status:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update order status.',
+      error: error.message,
+    });
+  }
+};
+
+// ---------- Cancel an order ----------
+const ADMIN_CANCELLABLE = ['processing', 'confirmed', 'manufacturing'];
+const CUSTOMER_CANCELLABLE = ['processing', 'confirmed'];
+const CUSTOMER_CUTOFF_HOURS = 24;
+
+const restoreStock = async (items) => {
+  const withIds = (items || []).filter((i) => i.productId);
+  await Promise.all(
+    withIds.map((i) =>
+      Product.updateOne(
+        { _id: i.productId, stock: { $type: 'number' } },
+        { $inc: { stock: i.quantity } }
+      ).catch((err) => console.error(`[Cancel] Stock restore failed for ${i.productId}:`, err.message))
+    )
+  );
+  if (withIds.length) {
+    await Product.updateMany(
+      { _id: { $in: withIds.map((i) => i.productId) }, stock: { $gt: 0 } },
+      { $set: { inStock: true } }
+    ).catch((err) => console.error('[Cancel] inStock update failed:', err.message));
+  }
+};
+
+const updateOrderInJson = async (order) => {
+  try {
+    const data = await fs.readFile(ordersJsonPath, 'utf8');
+    const orders = JSON.parse(data);
+    if (!Array.isArray(orders)) return;
+    const idx = orders.findIndex((o) => o._id?.toString() === order._id.toString());
+    if (idx === -1) return;
+    orders[idx] = order.toObject({ virtuals: true });
+    await fs.writeFile(ordersJsonPath, JSON.stringify(orders, null, 2));
+  } catch (err) {
+    console.error('Failed to update orders.json after update:', err);
+  }
+};
+
+const cancelOrderCore = async (order, { reason, by, allowed }) => {
+  const refundNeeded =
+    order.paymentStatus === 'completed' ||
+    (!!order.transactionId && order.paymentStatus !== 'failed');
+
+  const set = {
+    orderStatus: 'cancelled',
+    cancelledAt: new Date(),
+    cancelReason: String(reason || '').trim().slice(0, 500),
+    cancelledBy: by,
+  };
+  if (refundNeeded) set.paymentStatus = 'refund_pending';
+
+  const cancelled = await Order.findOneAndUpdate(
+    { _id: order._id, orderStatus: { $in: allowed } },
+    { $set: set },
+    { new: true }
+  );
+  if (!cancelled) return null;
+
+  await restoreStock(cancelled.items);
+
+  if (cancelled.sellerToken && typeof commissionController.cancelCommissionEntry === 'function') {
+    try {
+      await commissionController.cancelCommissionEntry(cancelled._id);
+    } catch (err) {
+      console.error('[Cancel] Commission reversal failed:', err);
+    }
+  }
+
+  updateOrderInJson(cancelled);
+
+  // Sends email, emits push/in-app notification, and sends WhatsApp status update
+  sendOrderStatusUpdateEmail(cancelled).catch((err) => console.error('Cancel notification failed:', err));
+
+  return cancelled;
+};
+
+const respondCancelled = (res, cancelled) =>
+  res.status(200).json({
+    success: true,
+    message: 'Order cancelled successfully.',
+    order: {
+      ...cancelled.toObject(),
+      scheduledDeliveryFormatted: formatScheduledDelivery(cancelled.scheduledDelivery),
+    },
+    refundPending: cancelled.paymentStatus === 'refund_pending',
+  });
+
+// Admin: PATCH /orders/:id/cancel  { reason }
+const adminCancelOrder = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!OBJECT_ID_RE.test(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid order id.' });
+    }
+    const order = await Order.findById(id);
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found.' });
+
+    if (order.orderStatus === 'cancelled') {
+      return res.status(400).json({ success: false, message: 'This order is already cancelled.' });
+    }
+    if (!ADMIN_CANCELLABLE.includes(order.orderStatus)) {
+      return res.status(400).json({
+        success: false,
+        message: `An order that is "${order.orderStatus}" can no longer be cancelled.`,
+      });
+    }
+
+    const cancelled = await cancelOrderCore(order, {
+      reason: req.body?.reason,
+      by: 'admin',
+      allowed: ADMIN_CANCELLABLE,
+    });
+    if (!cancelled) {
+      return res.status(409).json({
+        success: false,
+        message: 'Order status just changed. Please refresh and try again.',
+      });
+    }
+    return respondCancelled(res, cancelled);
+  } catch (error) {
+    console.error('Error cancelling order:', error);
+    return res.status(500).json({ success: false, message: 'Failed to cancel order.', error: error.message });
+  }
+};
+
+// Customer: POST /orders/:id/cancel  { email, reason }
+const customerCancelOrder = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    if (!OBJECT_ID_RE.test(id) || !email) {
+      return res.status(400).json({ success: false, message: 'Order id and email are required.' });
+    }
+
+    const order = await Order.findById(id);
+    if (!order || order.email.toLowerCase() !== email) {
+      return res.status(404).json({ success: false, message: 'Order not found.' });
+    }
+
+    if (order.orderStatus === 'cancelled') {
+      return res.status(400).json({ success: false, message: 'This order is already cancelled.' });
+    }
+    if (!CUSTOMER_CANCELLABLE.includes(order.orderStatus)) {
+      return res.status(400).json({
+        success: false,
+        message: 'This order is already being prepared. Please contact support to cancel it.',
+      });
+    }
+    if (order.scheduledDelivery) {
+      const hoursLeft = (new Date(order.scheduledDelivery).getTime() - Date.now()) / 3600000;
+      if (hoursLeft < CUSTOMER_CUTOFF_HOURS) {
+        return res.status(400).json({
+          success: false,
+          message: `Orders can only be cancelled at least ${CUSTOMER_CUTOFF_HOURS} hours before the scheduled time. Please contact support.`,
+        });
+      }
+    }
+
+    const cancelled = await cancelOrderCore(order, {
+      reason: req.body?.reason,
+      by: 'customer',
+      allowed: CUSTOMER_CANCELLABLE,
+    });
+    if (!cancelled) {
+      return res.status(409).json({
+        success: false,
+        message: 'Order status just changed. Please refresh and try again.',
+      });
+    }
+    return respondCancelled(res, cancelled);
+  } catch (error) {
+    console.error('Error cancelling order (customer):', error);
+    return res.status(500).json({ success: false, message: 'Failed to cancel order.', error: error.message });
   }
 };
 
 // Redesigned order confirmation email
 async function sendOrderConfirmationEmail(order) {
-  const { email, customerName, items, addOns, totalAmount, address, scheduledDelivery, customOrderId, paymentMethod, paymentStatus, upfrontAmount, remainingAmount, transactionId, phone } = order;
+  const {
+    email,
+    customerName,
+    items,
+    addOns,
+    totalAmount,
+    address,
+    scheduledDelivery,
+    customOrderId,
+    paymentMethod,
+    paymentStatus,
+    upfrontAmount,
+    remainingAmount,
+    transactionId,
+    phone,
+  } = order;
   const subject = 'Your Order is Confirmed - Decoryy';
 
-  const itemsSubtotal = (items || []).reduce((sum, item) => sum + (item.price * item.quantity), 0);
-  const addOnsTotal = (addOns && addOns.length > 0) ? addOns.reduce((sum, addOn) => sum + (addOn.price * (addOn.quantity || 1)), 0) : 0;
+  const itemsSubtotal = (items || []).reduce((sum, item) => sum + item.price * item.quantity, 0);
+  const addOnsTotal =
+    addOns && addOns.length > 0
+      ? addOns.reduce((sum, addOn) => sum + addOn.price * (addOn.quantity || 1), 0)
+      : 0;
   const subtotal = itemsSubtotal + addOnsTotal;
 
   let shipping = 0;
@@ -552,9 +894,10 @@ async function sendOrderConfirmationEmail(order) {
     shipping = Math.max(0, totalAmount - subtotal);
   }
 
-  const itemsHtml = (items || []).map(item => {
-    const itemTotal = item.price * item.quantity;
-    return `
+  const itemsHtml = (items || [])
+    .map((item) => {
+      const itemTotal = item.price * item.quantity;
+      return `
     <tr>
       <td style="padding: 12px; border: 1px solid #FFECB3; vertical-align: top;">
         <strong>${item.name}</strong>
@@ -565,13 +908,15 @@ async function sendOrderConfirmationEmail(order) {
       <td style="padding: 12px; border: 1px solid #FFECB3; text-align: right; vertical-align: top; font-weight: bold;">₹${itemTotal.toFixed(2)}</td>
     </tr>
   `;
-  }).join('');
+    })
+    .join('');
 
   let addOnsHtml = '';
   if (addOns && addOns.length > 0) {
-    const addOnRows = addOns.map(addOn => {
-      const addOnTotal = addOn.price * (addOn.quantity || 1);
-      return `
+    const addOnRows = addOns
+      .map((addOn) => {
+        const addOnTotal = addOn.price * (addOn.quantity || 1);
+        return `
         <tr>
           <td style="padding: 10px; border: 1px solid #FFECB3;">+ ${addOn.name} ${addOn.quantity > 1 ? `(x${addOn.quantity})` : ''}</td>
           <td style="padding: 10px; border: 1px solid #FFECB3; text-align: center;">${addOn.quantity || 1}</td>
@@ -579,7 +924,8 @@ async function sendOrderConfirmationEmail(order) {
           <td style="padding: 10px; border: 1px solid #FFECB3; text-align: right; font-weight: bold;">₹${addOnTotal.toFixed(2)}</td>
         </tr>
       `;
-    }).join('');
+      })
+      .join('');
 
     addOnsHtml = `
       <h3 style="color: #444; border-bottom: 2px solid #FFD700; padding-bottom: 5px; margin-top: 25px; margin-bottom: 10px; font-size: 18px;">Add-Ons</h3>
@@ -597,7 +943,12 @@ async function sendOrderConfirmationEmail(order) {
   }
 
   let mapLink = '';
-  if (address && address.location && Array.isArray(address.location.coordinates) && address.location.coordinates.length === 2) {
+  if (
+    address &&
+    address.location &&
+    Array.isArray(address.location.coordinates) &&
+    address.location.coordinates.length === 2
+  ) {
     const [lng, lat] = address.location.coordinates;
     mapLink = `<br/><a href="https://www.google.com/maps?q=${lat},${lng}" target="_blank" style="color: #E65100; font-weight: bold; text-decoration: none;">View on Map</a>`;
   }
@@ -606,7 +957,7 @@ async function sendOrderConfirmationEmail(order) {
     <p style="margin: 0; line-height: 1.8; font-size: 14px;">
       <strong>${customerName}</strong><br/>
       ${(address && address.street) || ''}<br/>
-      ${(address && address.city) ? address.city + ', ' : ''}${(address && address.pincode) || ''}<br/>
+      ${address && address.city ? address.city + ', ' : ''}${(address && address.pincode) || ''}<br/>
       ${(address && address.country) || 'India'}
       ${mapLink}
     </p>
@@ -615,7 +966,15 @@ async function sendOrderConfirmationEmail(order) {
   let scheduledDeliveryHtml = '';
   if (scheduledDelivery) {
     const deliveryDate = new Date(scheduledDelivery);
-    const options = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'Asia/Kolkata' };
+    const options = {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZone: 'Asia/Kolkata',
+    };
     const formattedDate = deliveryDate.toLocaleString('en-IN', options);
     scheduledDeliveryHtml = `
       <div style="margin-bottom: 20px; padding: 12px; background-color: #FFF9C4; border-left: 4px solid #FBC02D; border-radius: 5px; color: #444;">
@@ -625,8 +984,18 @@ async function sendOrderConfirmationEmail(order) {
     `;
   }
 
-  const paymentMethodText = paymentMethod === 'cod' ? 'Cash on Delivery' : paymentMethod === 'phonepe' || paymentMethod === 'online' ? 'Online Payment (PhonePe)' : paymentMethod || 'N/A';
-  const paymentStatusText = paymentStatus === 'completed' ? 'Paid' : paymentStatus === 'pending_upfront' ? 'Upfront Pending' : 'Pending';
+  const paymentMethodText =
+    paymentMethod === 'cod'
+      ? 'Cash on Delivery'
+      : paymentMethod === 'phonepe' || paymentMethod === 'online'
+      ? 'Online Payment (PhonePe)'
+      : paymentMethod || 'N/A';
+  const paymentStatusText =
+    paymentStatus === 'completed'
+      ? 'Paid'
+      : paymentStatus === 'pending_upfront'
+      ? 'Upfront Pending'
+      : 'Pending';
   const paymentStatusColor = paymentStatus === 'completed' ? '#4CAF50' : '#FF9800';
 
   let paymentDetailsHtml = `
@@ -646,7 +1015,7 @@ async function sendOrderConfirmationEmail(order) {
     day: 'numeric',
     hour: 'numeric',
     minute: '2-digit',
-    timeZone: 'Asia/Kolkata'
+    timeZone: 'Asia/Kolkata',
   });
 
   const htmlBody = `
@@ -716,11 +1085,14 @@ const getOrdersByEmail = async (req, res) => {
     if (!userEmail) {
       return res.status(400).json({ success: false, message: 'Email query parameter is required.' });
     }
-    const orders = await Order.find({ email: { $regex: new RegExp(`^${userEmail}$`, 'i') } }).sort({ createdAt: -1 });
+    const safeEmail = String(userEmail).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const orders = await Order.find({ email: { $regex: new RegExp(`^${safeEmail}$`, 'i') } }).sort({
+      createdAt: -1,
+    });
 
-    const formattedOrders = orders.map(order => ({
+    const formattedOrders = orders.map((order) => ({
       ...order.toObject(),
-      scheduledDeliveryFormatted: formatScheduledDelivery(order.scheduledDelivery)
+      scheduledDeliveryFormatted: formatScheduledDelivery(order.scheduledDelivery),
     }));
 
     res.status(200).json({ success: true, orders: formattedOrders });
@@ -739,7 +1111,7 @@ const getOrderById = async (req, res) => {
 
     const formattedOrder = {
       ...order.toObject(),
-      scheduledDeliveryFormatted: formatScheduledDelivery(order.scheduledDelivery)
+      scheduledDeliveryFormatted: formatScheduledDelivery(order.scheduledDelivery),
     };
 
     res.status(200).json({ success: true, order: formattedOrder });
@@ -768,14 +1140,35 @@ async function appendOrderToJson(order) {
 
 async function sendOrderStatusUpdateEmail(order) {
   const { email, customerName, orderStatus, customOrderId } = order;
-  const subject = `Order Status Update: #${customOrderId}`;
+  const isCancelled = orderStatus === 'cancelled';
+  const subject = isCancelled
+    ? `Order Cancelled: #${customOrderId}`
+    : `Order Status Update: #${customOrderId}`;
 
   // In-app + phone push notification for the status change.
-  // This function already runs whenever an order's status changes,
-  // so the notification is sent from the same place as the email.
   emit('order.status', { order, status: orderStatus });
 
-  const htmlBody = `
+  // Send WhatsApp status update (non-blocking)
+  sendOrderStatusWhatsApp(order).catch((err) =>
+    console.error('Status WhatsApp notification failed:', err)
+  );
+
+  const refundNote =
+    isCancelled && order.paymentStatus === 'refund_pending'
+      ? `<p>Your payment will be refunded to your original payment method. If you don't receive it within 5–7 business days, please contact us.</p>`
+      : '';
+
+  const htmlBody = isCancelled
+    ? `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 2px solid #E53935; border-radius: 10px;">
+      <h2>Hi ${customerName},</h2>
+      <p>Your order <strong>#${customOrderId}</strong> has been <strong>cancelled</strong>.</p>
+      ${order.cancelReason ? `<p>Reason: ${order.cancelReason}</p>` : ''}
+      ${refundNote}
+      <p>If you have any questions, just reply to this email.</p>
+    </div>
+  `
+    : `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 2px solid #FFD700; border-radius: 10px;">
       <h2>Hi ${customerName},</h2>
       <p>Your order <strong>#${customOrderId}</strong> has been updated to: <strong>${orderStatus.toUpperCase()}</strong>.</p>
@@ -794,9 +1187,13 @@ async function sendOrderStatusUpdateEmail(order) {
 
 module.exports = {
   createOrder,
+  updateOrderStatus,
   getOrdersByEmail,
   getOrderById,
   deleteOrder,
   sendOrderStatusUpdateEmail,
+  sendOrderStatusWhatsApp,
   formatScheduledDelivery,
+  adminCancelOrder,
+  customerCancelOrder,
 };
