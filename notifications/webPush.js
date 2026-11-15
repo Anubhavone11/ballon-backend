@@ -4,6 +4,10 @@ const { log } = require('../utils/pushLog');
 const publicKey = process.env.VAPID_PUBLIC_KEY;
 const privateKey = process.env.VAPID_PRIVATE_KEY;
 
+// Points directly to frontend/public/image.png
+const DEFAULT_ICON = process.env.WEB_PUSH_ICON || '/image.png';
+const DEFAULT_BADGE = process.env.WEB_PUSH_BADGE || '/image.png';
+
 if (publicKey && privateKey) {
   webpush.setVapidDetails(
     process.env.VAPID_SUBJECT || 'mailto:support@decoryy.com',
@@ -20,7 +24,7 @@ function webUrlFor(m) {
   return m.route || '/account';
 }
 
-async function sendWebPush(Model, id, { title, body, url, tag }) {
+async function sendWebPush(Model, id, { title, body, url, tag, icon, badge, image }) {
   const who = String(id || '');
   log('send:called', { who, title });
 
@@ -32,7 +36,16 @@ async function sendWebPush(Model, id, { title, body, url, tag }) {
   log('send:subscriptions-found', { who, model: Model.modelName, count: subs.length });
   if (!subs.length) return;
 
-  const payload = JSON.stringify({ title, body, url: url || '/', tag });
+  const payload = JSON.stringify({
+    title,
+    body,
+    url: url || '/',
+    tag,
+    icon: icon || DEFAULT_ICON,
+    badge: badge || DEFAULT_BADGE,
+    ...(image ? { image } : {}),
+  });
+
   const dead = [];
 
   await Promise.all(
