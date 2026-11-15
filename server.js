@@ -9,10 +9,9 @@ const fs = require('fs');
 const { createClient } = require('redis');
 const rateLimit = require('express-rate-limit');
 const { RedisStore } = require('rate-limit-redis');
-// Route Imports (top of file)
-// const wishlistRoutes = require('./routes/wishlist');
-const shoppingCartRoutes = require('./routes/shoppingcart');
+
 // Route Imports
+const shoppingCartRoutes = require('./routes/shoppingcart');
 const personalizationRoutes = require('./routes/personalization');
 const shopRoutes = require('./routes/shop');
 const productRoutes = require('./routes/products');
@@ -49,7 +48,12 @@ app.set('trust proxy', 1);
 // ─── Redis Setup (v5 compatible) ─────────────────────────────────────────────
 const redisClient = createClient({
   url: process.env.REDIS_URL || 'redis://127.0.0.1:6379',
-  RESP: 2
+  RESP: 2,
+  socket: {
+    connectTimeout: 5000,
+    // Keep retrying in the background, but never faster than once every 5 seconds
+    reconnectStrategy: (retries) => Math.min(retries * 500, 5000),
+  },
 });
 
 redisClient.on('error', (err) => {
@@ -62,7 +66,8 @@ redisClient.on('connect', () => {
 
 app.set('redisClient', redisClient);
 
-// ─── Redis Cache Middleware with Detailed Logging ────────────────────────────
+// ─── Redis Cache Middleware ──────────────────────────────────────────────────
+// Falls straight through to the database if Redis is down.
 const cacheMiddleware = (durationInSeconds = 300) => {
   return async (req, res, next) => {
     if (req.method !== 'GET' || !redisClient.isReady) {
@@ -75,26 +80,21 @@ const cacheMiddleware = (durationInSeconds = 300) => {
       const cachedData = await redisClient.get(cacheKey);
 
       if (cachedData) {
-        console.log(`[REDIS CACHE HIT] Key: "${cacheKey}" served directly from Redis`);
+        console.log(`[REDIS CACHE HIT] Key: "${cacheKey}"`);
         return res.status(200).json(JSON.parse(cachedData));
       }
 
-      console.log(`[REDIS CACHE MISS] Key: "${cacheKey}" - Fetching fresh data from database...`);
+      console.log(`[REDIS CACHE MISS] Key: "${cacheKey}"`);
 
-      // Intercept res.json to log and store fresh data into Redis
+      // Intercept res.json to store fresh data into Redis
       const sendJsonResponse = res.json.bind(res);
       res.json = (body) => {
-        if (res.statusCode >= 200 && res.statusCode < 300) {
+        if (res.statusCode >= 200 && res.statusCode < 300 && redisClient.isReady) {
           const stringified = JSON.stringify(body);
 
           redisClient.setEx(cacheKey, durationInSeconds, stringified)
             .then(() => {
-              const preview = stringified.length > 150
-                ? stringified.substring(0, 150) + '... (truncated)'
-                : stringified;
-
               console.log(`[REDIS STORED] Key: "${cacheKey}" | TTL: ${durationInSeconds}s | Size: ${stringified.length} bytes`);
-              console.log(`[REDIS STORED DATA PREVIEW]: ${preview}`);
             })
             .catch((err) => {
               console.error('[REDIS SET ERROR]', err.message);
@@ -124,22 +124,30 @@ const allowedOrigins = [
   'http://localhost:5174',
   'http://localhost:5175',
   'http://localhost:8081',
+  'https://decoryy.com',            // non-www (was missing: caused "Network Error" for those visitors)
   'https://www.decoryy.com',
-  'https://ballon-frontend.vercel.app',
-  'https://ballon-admin-beta.vercel.app',
   'https://admin.decoryy.com',
-  'https://ballon-frontend-psi.vercel.app'
+  'https://ballon-frontend.vercel.app',
+  'https://ballon-frontend-psi.vercel.app',
+  'https://ballon-admin-beta.vercel.app',
 ];
 
-// cors() alone handles headers + preflight. The old duplicate manual
-// header middleware has been removed.
+// Also allow your own Vercel preview deployments
+const isAllowedOrigin = (origin) =>
+  !origin ||
+  allowedOrigins.includes(origin) ||
+  /^https:\/\/ballon-frontend-[a-z0-9-]+\.vercel\.app$/.test(origin);
+
+// cors() alone handles headers + preflight.
 app.use(cors({
   origin: function (origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (isAllowedOrigin(origin)) {
       return callback(null, true);
     }
     console.log('CORS blocked origin:', origin);
-    callback(new Error('Not allowed by CORS'));
+    const err = new Error('Not allowed by CORS');
+    err.status = 403;
+    callback(err);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
@@ -226,6 +234,12 @@ app.get('/test-cors', (req, res) => {
   });
 });
 
+// Server clock for checkout slot validation (never cached, never rate limited)
+app.get('/api/time', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ now: Date.now() });
+});
+
 const PORT = process.env.PORT || 5175;
 const httpServer = http.createServer(app);
 const io = initSocket(httpServer);
@@ -236,21 +250,33 @@ mongoose.set('autoIndex', true);
 // ─── Mount Routes & Start Server ─────────────────────────────────────────────
 async function startServer() {
   try {
-    // 1. Connect Redis FIRST so RateLimiter can initialize
+    // 1. Connect Redis. If it is down, keep going: cache is skipped and
+    //    rate limiting falls back to in-memory, so checkout never goes down with it.
     console.log('Connecting to Redis...');
-    await redisClient.connect();
+    try {
+      await redisClient.connect();
+    } catch (e) {
+      console.error('Redis unavailable, continuing without cache:', e.message);
+    }
 
-    // 2. Redis-backed Rate Limiters (lenient)
+    // Redis-backed store when Redis is up, otherwise the default in-memory store
+    const makeStore = (prefix) =>
+      redisClient.isReady
+        ? new RedisStore({
+            sendCommand: (...args) => redisClient.sendCommand(args),
+            prefix,
+          })
+        : undefined;
+
+    // 2. Rate Limiters (lenient)
     const globalLimiter = rateLimit({
       windowMs: 15 * 60 * 1000,
-      max: 1500,                       // was 300
+      max: 1500,
       standardHeaders: true,
       legacyHeaders: false,
+      passOnStoreError: true, // if the store errors, let the request through
       skip: (req) => req.method === 'OPTIONS',
-      store: new RedisStore({
-        sendCommand: (...args) => redisClient.sendCommand(args),
-        prefix: 'rl:global:'
-      }),
+      store: makeStore('rl:global:'),
       handler: (req, res) => {
         console.warn(`[RATE LIMIT EXCEEDED] IP: ${req.ip} exceeded general limit on ${req.originalUrl}`);
         res.status(429).json({
@@ -262,14 +288,12 @@ async function startServer() {
 
     const authLimiter = rateLimit({
       windowMs: 15 * 60 * 1000,
-      max: 50,                         // was 10
-      skipSuccessfulRequests: true,    // only failed attempts count
+      max: 50,
+      skipSuccessfulRequests: true, // only failed attempts count
       standardHeaders: true,
       legacyHeaders: false,
-      store: new RedisStore({
-        sendCommand: (...args) => redisClient.sendCommand(args),
-        prefix: 'rl:auth:'
-      }),
+      passOnStoreError: true,
+      store: makeStore('rl:auth:'),
       handler: (req, res) => {
         console.warn(`[AUTH LIMIT EXCEEDED] IP: ${req.ip} exceeded auth attempts on ${req.originalUrl}`);
         res.status(429).json({
@@ -286,9 +310,10 @@ async function startServer() {
     app.use('/api/auth', authLimiter, authRoutes);
     app.use('/api/admin/auth', authLimiter, adminAuthRoutes);
     app.use('/api/notifications', require('./routes/notifications'));
+
     // High-Read Cached Routes
     app.use('/api/categories', cacheMiddleware(300), categoryRoutes);       // 5 mins
-    // Original mount: serves /api/categories/:id/subcategories (cache above already wraps it)
+    // Original mount: serves /api/categories/:id/subcategories
     app.use('/api/categories', subCategoryRoutes);
     app.use('/api/subcategories', cacheMiddleware(300), subCategoryRoutes);
     app.use('/api/banners', cacheMiddleware(300), bannerRoutes);
@@ -297,14 +322,13 @@ async function startServer() {
     app.use('/api/featured-products', cacheMiddleware(180), featuredProductRoutes);
     app.use('/api/cities', cacheMiddleware(600), require('./routes/city')); // 10 mins
     app.use('/api/blog', cacheMiddleware(300), blogRoutes);
-app.use('/api/personalization', personalizationRoutes);
+    app.use('/api/personalization', personalizationRoutes);
+
     // Dynamic & Non-cached Routes
     app.use('/api/activity-tracking', require('./routes/Activityroutes'));
     app.use('/api/shop', productRoutes);
-    // Dynamic & Non-cached Routes
-app.use('/api/shopping-cart', shoppingCartRoutes);
-app.use('/api/wishlist', wishlistRoutes);
-    
+    app.use('/api/shopping-cart', shoppingCartRoutes);
+    app.use('/api/wishlist', wishlistRoutes);
     app.use('/api/products', productRoutes);
     app.use('/api/orders', orderRoutes);
     app.use('/api/admin/bookings', adminBookingRoutes);
@@ -329,12 +353,14 @@ app.use('/api/wishlist', wishlistRoutes);
     // Original catch-all mount for subCategoryRoutes (must stay LAST among /api routes)
     app.use('/api', subCategoryRoutes);
 
-    // Global error handler
+    // Global error handler: keeps real status codes instead of turning everything into 500
     app.use((err, req, res, next) => {
       console.error('Error:', err.message);
-      res.status(500).json({
-        message: 'Something went wrong!',
-        error: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error'
+      const status = err.status || err.statusCode || 500;
+      res.status(status).json({
+        success: false,
+        message: status === 500 ? 'Something went wrong!' : err.message,
+        error: process.env.NODE_ENV === 'development' ? err.message : undefined
       });
     });
 

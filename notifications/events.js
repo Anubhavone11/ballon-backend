@@ -196,7 +196,7 @@ module.exports = {
         to: 'seller',
         id: sellerId,
         title: `🚨 NEW BOOKING OFFER (${priceText})`,
-        body: `${location} - Tap or choose an option to accept this request.`,
+        body: `${location} — Tap or choose an option to accept this request.`,
         route: `/account?tab=jobs&bookingId=${booking._id}`,
         channelId: 'booking_offers',
         categoryId: 'booking_offer_actions',

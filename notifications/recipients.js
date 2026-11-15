@@ -1,16 +1,37 @@
 // backend/notifications/recipients.js
 // Helpers that work out WHO should receive a notification.
 const mongoose = require('mongoose');
+const jwt = require('jsonwebtoken');
 
 /**
- * Orders don't store a userId, so find the customer account for an order:
- *   1. the logged-in user on the request (if the route has login middleware)
- *   2. the account whose phone matches the order phone (last 10 digits)
- *   3. the account whose email matches the order email
+ * Finds the customer account for an order:
+ *   1. Logged-in user on req (if route has auth middleware)
+ *   2. Explicit order.userId (if sent on the order)
+ *   3. Valid Bearer JWT in Authorization header (even on public checkout routes)
+ *   4. Account whose phone matches the order phone (last 10 digits)
+ *   5. Account whose email matches the order email
  */
 async function customerIdForOrder(order, req) {
-  const fromAuth = req?.user?._id || req?.userId;
+  const fromAuth = req?.user?._id || req?.user?.id || req?.userId;
   if (fromAuth) return fromAuth;
+
+  if (order?.userId && mongoose.Types.ObjectId.isValid(order.userId)) {
+    return order.userId;
+  }
+
+  const authHeader = req?.headers?.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ') && process.env.JWT_SECRET) {
+    try {
+      const token = authHeader.split(' ')[1];
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      const tokenId = decoded?._id || decoded?.id || decoded?.userId;
+      if (tokenId && mongoose.Types.ObjectId.isValid(tokenId)) {
+        return tokenId;
+      }
+    } catch {
+      // Ignore expired/invalid token and fall back to phone/email lookup
+    }
+  }
 
   const User = mongoose.models.User;
   if (!User) return null;

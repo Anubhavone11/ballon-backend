@@ -165,9 +165,24 @@ const sellerSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
-   pushTokens: {
+
+  pushTokens: {
     type: [String],
-    default: [],
+    default: []
+  },
+
+  webPushSubscriptions: {
+    type: [
+      {
+        endpoint: { type: String, required: true },
+        keys: {
+          p256dh: { type: String, required: true },
+          auth: { type: String, required: true }
+        },
+        _id: false
+      }
+    ],
+    default: []
   },
 
   createdAt: {
