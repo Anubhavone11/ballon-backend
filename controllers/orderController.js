@@ -4,20 +4,35 @@ const Seller = require('../models/Seller');
 const Product = require('../models/Product');
 const commissionController = require('./commissionController');
 const { emit } = require('../notifications'); // notification system
+const validateSchedule = require('../utils/validateSchedule');
 const nodemailer = require('nodemailer');
 const axios = require('axios');
 const fs = require('fs').promises;
 const path = require('path');
 const ordersJsonPath = path.join(__dirname, '../data/orders.json');
 
-// Utility function to format scheduled delivery time
+// Utility function to format scheduled delivery time.
+// Always IST, whatever timezone the server runs in.
 const formatScheduledDelivery = (scheduledDelivery) => {
   if (!scheduledDelivery) return null;
 
   const deliveryDate = new Date(scheduledDelivery);
+  if (isNaN(deliveryDate.getTime())) return null;
+
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(deliveryDate);
+  const g = (t) => parts.find((p) => p.type === t).value;
+
   return {
-    date: deliveryDate.toISOString().split('T')[0], // YYYY-MM-DD format
-    time: deliveryDate.toTimeString().split(' ')[0].substring(0, 5), // HH:MM format
+    date: `${g('year')}-${g('month')}-${g('day')}`, // YYYY-MM-DD in IST
+    time: `${g('hour')}:${g('minute')}`,             // HH:MM in IST
     formatted: deliveryDate.toLocaleString('en-IN', {
       timeZone: 'Asia/Kolkata',
       weekday: 'long',
@@ -284,8 +299,9 @@ const MAX_LINE_ITEMS = 20;   // different packages in one order
 const MAX_QTY_PER_ITEM = 10; // quantity of one package
 const OBJECT_ID_RE = /^[a-f\d]{24}$/i;
 
+// WARNING: while this is false, prices come from the browser and can be edited by a customer.
+// Set to true once your database prices match what customers see.
 const ENFORCE_DB_PRICES = false;
-const MIN_LEAD_MINUTES = 0;
 
 // Validates every line, merges duplicates of the same product, caps sizes.
 const sanitizeItems = (rawItems) => {
@@ -442,15 +458,16 @@ const createOrder = async (req, res) => {
       couponCode,
       scheduledDelivery,
       addOns,
+      idempotencyKey,
     } = req.body;
 
     if (!paymentStatus) {
       paymentStatus = paymentMethod === 'cod' ? 'pending_upfront' : 'pending';
     }
 
+    // Email is optional (the checkout form marks it optional)
     const requiredFields = {
       customerName,
-      email,
       phone,
       address,
       items,
@@ -466,8 +483,32 @@ const createOrder = async (req, res) => {
       });
     }
 
+    email = email ? String(email).trim() : '';
+
     if (!Number.isFinite(Number(totalAmount)) || Number(totalAmount) < 0) {
       return res.status(400).json({ success: false, message: 'Invalid total amount.' });
+    }
+
+    // Idempotency: a retry of the SAME order returns the existing order instead of a duplicate
+    const idemKey =
+      typeof idempotencyKey === 'string' && idempotencyKey.length >= 8 && idempotencyKey.length <= 100
+        ? idempotencyKey
+        : null;
+
+    const respondExisting = (existing) =>
+      res.status(200).json({
+        success: true,
+        duplicate: true,
+        message: 'Order already created.',
+        order: {
+          ...existing.toObject(),
+          scheduledDeliveryFormatted: formatScheduledDelivery(existing.scheduledDelivery),
+        },
+      });
+
+    if (idemKey) {
+      const existing = await Order.findOne({ idempotencyKey: idemKey });
+      if (existing) return respondExisting(existing);
     }
 
     // 1) Validate + merge the items
@@ -490,31 +531,14 @@ const createOrder = async (req, res) => {
         }));
     }
 
-    // 3) Scheduled delivery (IST business hours; same-day allowed)
+    // 3) Scheduled delivery (shared validator: valid date, in the future, 9 AM to 9 PM IST)
     let processedScheduledDelivery = null;
     if (scheduledDelivery) {
-      const deliveryDate = new Date(scheduledDelivery);
-      if (isNaN(deliveryDate.getTime())) {
-        return res.status(400).json({ success: false, message: 'Invalid scheduled delivery date format.' });
+      const scheduleError = validateSchedule(scheduledDelivery);
+      if (scheduleError) {
+        return res.status(400).json({ success: false, message: scheduleError });
       }
-
-      if (deliveryDate.getTime() < Date.now() + MIN_LEAD_MINUTES * 60 * 1000) {
-        return res.status(400).json({
-          success: false,
-          message: 'That time slot has already passed. Please choose a later slot.',
-        });
-      }
-
-      const deliveryDateIST = new Date(deliveryDate.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-      const deliveryHourIST = deliveryDateIST.getHours();
-      if (deliveryHourIST < 9 || deliveryHourIST > 21) {
-        return res.status(400).json({
-          success: false,
-          message: 'Scheduled delivery time must be between 9:00 AM and 9:00 PM.',
-        });
-      }
-
-      processedScheduledDelivery = deliveryDate;
+      processedScheduledDelivery = new Date(scheduledDelivery);
     }
 
     // 4) Check every package is bookable
@@ -553,6 +577,7 @@ const createOrder = async (req, res) => {
       transactionId: transactionId || undefined,
       couponCode: couponCode || undefined,
       scheduledDelivery: processedScheduledDelivery,
+      idempotencyKey: idemKey || undefined,
     });
 
     await newOrder.validate();
@@ -569,6 +594,11 @@ const createOrder = async (req, res) => {
       savedOrder = await newOrder.save();
     } catch (saveErr) {
       await releaseStock(stock.reserved);
+      // Two identical requests raced: the unique index stopped the second one
+      if (idemKey && saveErr && saveErr.code === 11000) {
+        const existing = await Order.findOne({ idempotencyKey: idemKey });
+        if (existing) return respondExisting(existing);
+      }
       throw saveErr;
     }
 
@@ -819,7 +849,7 @@ const customerCancelOrder = async (req, res) => {
     }
 
     const order = await Order.findById(id);
-    if (!order || order.email.toLowerCase() !== email) {
+    if (!order || String(order.email || '').toLowerCase() !== email) {
       return res.status(404).json({ success: false, message: 'Order not found.' });
     }
 
@@ -878,6 +908,10 @@ async function sendOrderConfirmationEmail(order) {
     transactionId,
     phone,
   } = order;
+
+  // No email on the order (it is optional): nothing to send
+  if (!email) return;
+
   const subject = 'Your Order is Confirmed - Decoryy';
 
   const itemsSubtotal = (items || []).reduce((sum, item) => sum + item.price * item.quantity, 0);
@@ -1175,7 +1209,8 @@ async function sendOrderStatusUpdateEmail(order) {
     </div>
   `;
 
-  if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+  // The email is optional on an order: push and WhatsApp above still go out
+  if (email && process.env.EMAIL_USER && process.env.EMAIL_PASS) {
     await transporter.sendMail({
       from: `"Decoryy" <${process.env.EMAIL_USER}>`,
       to: email,
@@ -1196,4 +1231,9 @@ module.exports = {
   formatScheduledDelivery,
   adminCancelOrder,
   customerCancelOrder,
+  // used by paymentController (online payments)
+  sendOrderConfirmationEmail,
+  sendOrderConfirmationWhatsApp,
+  sanitizeItems,
+  checkAvailability,
 };
