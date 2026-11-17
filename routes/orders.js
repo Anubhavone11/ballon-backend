@@ -1,4 +1,4 @@
-// File: admin/backend/routes/orders.js
+// File: routes/orders.js
 const express = require("express");
 const Order = require("../models/Order");
 const router = express.Router();
@@ -6,7 +6,6 @@ const fs = require('fs');
 const path = require('path');
 const {
   createOrder,
-  getOrdersByEmail,
   getOrderById,
   sendOrderStatusUpdateEmail,
   deleteOrder,
@@ -15,6 +14,9 @@ const {
   customerCancelOrder,
 } = require('../controllers/orderController');
 const { authenticateToken, isAdmin } = require('../middleware/auth');
+// Customer (logged-in user) auth. If userAuth.js exports an object instead of the function,
+// change this to: const { userAuth } = require('../middleware/userAuth');
+const userAuth = require('../middleware/userAuth');
 
 const ordersFilePath = path.join(__dirname, '../data/orders.json');
 
@@ -83,6 +85,29 @@ router.get('/json', authenticateToken, isAdmin, async (req, res) => {
     res.json({ success: true, orders: formattedOrders });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Failed to fetch orders from MongoDB', error: error.message });
+  }
+});
+
+// Customer: orders of the logged-in user, matched by phone number (no email needed)
+// GET /api/orders/user/history
+// Must stay ABOVE "/:id" routes so "user" is not treated as an order id.
+router.get('/user/history', userAuth, async (req, res) => {
+  try {
+    const digits = String(req.user?.phone || '').replace(/\D/g, '');
+    if (digits.length < 10) {
+      return res.json({ success: true, orders: [] });
+    }
+
+    // Compare the last 10 digits so "919470516408" matches "9470516408"
+    const last10 = digits.slice(-10);
+    const orders = await Order.find({
+      phone: { $in: [last10, `91${last10}`, `+91${last10}`] },
+    }).sort({ createdAt: -1 });
+
+    res.json({ success: true, orders });
+  } catch (error) {
+    console.error('Error fetching user orders:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch orders' });
   }
 });
 
@@ -220,10 +245,6 @@ router.put("/:id", authenticateToken, isAdmin, async (req, res) => {
     });
   }
 });
-
-// Route to get all orders for a user by email
-// GET /api/orders?email=user@example.com
-router.get('/', getOrdersByEmail);
 
 // Route to get a single order by its ID
 // GET /api/orders/:id
